@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "MAST water meter",
+        "description": "Paste the current `jwt` token from the MAST web app: log in at mast.co.il, open browser DevTools → Network, click any request to `api.mast.co.il` and copy the `jwt` request header. The token is valid for about 48 hours. You can automate this later with the userscript (see the README).",
+        "data": {
+          "token": "jwt token",
+          "company_id": "Company ID (X-CompanyId)"
+        }
+      },
+      "card": {
+        "title": "Choose your water card",
+        "description": "Pick the water meter card to import. If your cards could not be listed automatically, type the card number.",
+        "data": {
+          "card_number": "Water card"
+        }
+      },
+      "webhook": {
+        "title": "Token push URL (optional)",
+        "description": "To send fresh tokens to Home Assistant automatically, install the userscript from the README and give it one of these URLs. Treat the URL as a secret: anyone who has it can push a token (it is only accepted if it works for your card).\n\nSame network as Home Assistant:\n`{internal_url}`\n\nFrom anywhere:\n`{external_url}`\n\nYou can show these again later via the integration's menu → Reconfigure."
+      },
+      "reconfigure": {
+        "title": "Token push URL",
+        "description": "Give one of these URLs to the userscript. Treat it as a secret.\n\nSame network as Home Assistant:\n`{internal_url}`\n\nFrom anywhere:\n`{external_url}`"
+      },
+      "reauth_confirm": {
+        "title": "MAST token expired",
+        "description": "Paste a fresh `jwt` token from the MAST web app, or just log in at mast.co.il in a browser with the userscript installed and this will resolve itself.",
+        "data": {
+          "token": "jwt token"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "That does not look like a JWT token.",
+      "token_expired": "That token has already expired. Copy a fresh one.",
+      "invalid_auth": "MAST rejected the token.",
+      "invalid_card": "MAST returned an error. Check the card number.",
+      "cannot_connect": "Could not reach api.mast.co.il.",
+      "no_data": "The request worked but returned no readings."
+    },
+    "abort": {
+      "already_configured": "This water card is already configured.",
+      "reauth_successful": "Token updated.",
+      "reconfigure_successful": "Done."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "meter_reading": { "name": "Meter reading" },
+      "daily_usage": { "name": "Latest daily usage" },
+      "token_expiry": { "name": "Token expires" }
+    }
+  }
+}
