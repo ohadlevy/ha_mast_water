@@ -16,7 +16,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .api import MastApiError, MastAuthError, MastClient, MastConnectionError
-from .const import BACKFILL_DAYS, CHUNK_DAYS, DOMAIN, STORE_VERSION, UPDATE_INTERVAL
+from .const import (
+    BACKFILL_DAYS,
+    CHUNK_DAYS,
+    CONF_TOKEN,
+    SMALL_CHUNK_DAYS,
+    DOMAIN,
+    STORE_VERSION,
+    UPDATE_INTERVAL,
+)
 from .helpers import Reading, build_rows, token_expiry
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,6 +89,19 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         self._card = card
         self._expiry = token_expiry(token)
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{card}")
+        self._chunk_days = CHUNK_DAYS
+
+    def _persist_renewed_token(self) -> None:
+        """Store a token MAST renewed via the `new-token` response header."""
+        entry = self.config_entry
+        current = self._client.token
+        if current == entry.data.get(CONF_TOKEN):
+            return
+        self._expiry = token_expiry(current)
+        self.hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_TOKEN: current}
+        )
+        _LOGGER.info("MAST renewed the session token (expires %s)", self._expiry)
 
     async def _fetch(self, start: date, end: date) -> list[Reading]:
         """Fetch [start, end] in chunks. Old failing chunks are skipped."""
@@ -88,7 +109,7 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         cursor = start
         last_error: Exception | None = None
         while cursor <= end:
-            chunk_end = min(cursor + timedelta(days=CHUNK_DAYS - 1), end)
+            chunk_end = min(cursor + timedelta(days=self._chunk_days - 1), end)
             try:
                 readings += await self._client.async_get_readings(cursor, chunk_end)
                 last_error = None
@@ -97,8 +118,16 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             except MastConnectionError as err:
                 raise UpdateFailed(f"Cannot reach MAST: {err}") from err
             except MastApiError as err:
-                _LOGGER.warning("MAST range %s..%s failed: %s", cursor, chunk_end, err)
-                last_error = err
+                if err.status == 404:
+                    last_error = None  # the web app treats 404 as "no data in this range"
+                elif err.status == 400 and self._chunk_days > SMALL_CHUNK_DAYS:
+                    # This water corporation limits requests to a shorter range.
+                    _LOGGER.info("MAST rejected a %d-day range, using %d days", self._chunk_days, SMALL_CHUNK_DAYS)
+                    self._chunk_days = SMALL_CHUNK_DAYS
+                    continue  # retry the same range in smaller pieces
+                else:
+                    _LOGGER.warning("MAST range %s..%s failed: %s", cursor, chunk_end, err)
+                    last_error = err
             cursor = chunk_end + timedelta(days=1)
         if last_error is not None:
             # The most recent chunk failed, so there is nothing trustworthy.
@@ -117,7 +146,10 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         today = dt_util.now().date()
         start = anchor_day if anchor_day else today - timedelta(days=BACKFILL_DAYS)
 
-        fetched = await self._fetch(start, today)
+        try:
+            fetched = await self._fetch(start, today)
+        finally:
+            self._persist_renewed_token()
         # Chunk boundaries (or the API itself) may repeat a day: keep one per day.
         by_day = {r.day: r for r in fetched}
         readings = [by_day[d] for d in sorted(by_day)]

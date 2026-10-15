@@ -64,7 +64,9 @@ async def _validate(
         return "invalid_auth"
     except MastConnectionError:
         return "cannot_connect"
-    except MastApiError:
+    except MastApiError as err:
+        if err.status == 404:
+            return "no_data"  # the web app treats 404 as "no readings"
         # The API answers an unknown card number with a generic HTTP 500.
         return "invalid_card"
     return None if readings else "no_data"

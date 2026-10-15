@@ -18,9 +18,13 @@ DEFAULT_COMPANY_ID = "110"
 
 UPDATE_INTERVAL = timedelta(hours=6)
 
-# How far back the very first run asks for data. Empty or failing chunks are
-# skipped, so asking for more than the portal holds is harmless.
+# How far back the very first run asks for data. The web app's date picker allows
+# about two years. Empty or failing old chunks are skipped.
 BACKFILL_DAYS = 730
-CHUNK_DAYS = 90
+# The web app limits one request to 30 days (its default window is 30 days
+# inclusive), or only 7 days for water corporations whose meters come from the
+# supplier "Arad" or "AradHarmony". Start with 30 and fall back to 7 on HTTP 400.
+CHUNK_DAYS = 30
+SMALL_CHUNK_DAYS = 7
 
 STORE_VERSION = 1

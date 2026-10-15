@@ -48,8 +48,19 @@ def readings() -> list[Reading]:
     return [Reading(last - timedelta(days=11 - i), v) for i, v in enumerate(values)]
 
 
-async def fake_get_readings(self, date_from, date_to):
-    return [r for r in readings() if date_from <= r.day <= date_to]
+def limited_get_readings(max_span_days: int):
+    """Fake API that rejects ranges longer than the web app allows (HTTP 400)."""
+
+    async def _get(self, date_from, date_to):
+        if (date_to - date_from).days > max_span_days:
+            raise MastApiError("HTTP 400", 400)
+        return [r for r in readings() if date_from <= r.day <= date_to]
+
+    return _get
+
+
+# The web app allows at most 30 days between dateFrom and dateTo.
+fake_get_readings = limited_get_readings(30)
 
 
 def make_entry(token: str) -> MockConfigEntry:
@@ -333,3 +344,96 @@ async def test_unload_removes_webhook(
         resp = await client.post(hook_path, json={"token": mk_token(48)})
     # HA answers 200 with an empty body for unknown webhook ids (so ids can't be probed).
     assert (await resp.text()) == ""
+
+
+# ------------------------------------------------------ renewed token (`new-token`)
+
+
+def test_client_adopts_only_valid_longer_lived_new_token():
+    from custom_components.mast_water.api import MastClient
+
+    old, newer, older = mk_token(10), mk_token(48), mk_token(2)
+    c = MastClient(None, old, CARD, "110")
+    c._adopt_new_token(None)
+    c._adopt_new_token("garbage")
+    c._adopt_new_token(f"Bearer {older}")  # shorter-lived: ignored
+    assert c.token == old
+    c._adopt_new_token(f"Bearer {newer}")
+    assert c.token == newer
+
+
+async def test_renewed_token_is_persisted_by_the_coordinator(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    old = mk_token(10)
+    renewed = mk_token(48)
+    entry = make_entry(old)
+
+    async def readings_and_renew(self, date_from, date_to):
+        self._adopt_new_token(f"Bearer {renewed}")  # what the real client does on a response
+        return await fake_get_readings(self, date_from, date_to)
+
+    with patch(f"{API}.async_get_readings", readings_and_renew), patch(STATS):
+        await setup_entry(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data[CONF_TOKEN] == renewed
+    reg = er.async_get(hass)
+    expiry = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry"))
+    assert datetime.fromisoformat(expiry.state) > datetime.now(timezone.utc) + timedelta(hours=40)
+
+
+# --------------------------------------------------- range limits and "no data"
+
+
+async def test_requests_never_exceed_the_30_day_limit(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    spans: list[int] = []
+
+    async def spy(self, date_from, date_to):
+        spans.append((date_to - date_from).days)
+        return await fake_get_readings(self, date_from, date_to)
+
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", spy), patch(STATS) as stats:
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.LOADED
+    assert spans and max(spans) <= 29  # same 30-day window the web app uses by default
+    assert len(stats.call_args.args[2]) == 12  # full history still imported
+
+
+async def test_falls_back_to_7_day_ranges_when_mast_rejects_30(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    """Some water corporations (Arad meters) only allow 7 days per request."""
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", limited_get_readings(6)), patch(STATS) as stats:
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.LOADED
+    assert len(stats.call_args.args[2]) == 12
+    assert entry.runtime_data._chunk_days == 7
+
+
+async def test_404_means_no_data_not_an_error(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    async def old_empty(self, date_from, date_to):
+        if date_to < date.today() - timedelta(days=20):
+            raise MastApiError("HTTP 404", 404)  # web app: 404 = empty result
+        return await fake_get_readings(self, date_from, date_to)
+
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", old_empty), patch(STATS) as stats:
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.LOADED
+    assert len(stats.call_args.args[2]) == 12
+
+
+async def test_other_errors_on_the_latest_chunk_still_fail_the_update(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastApiError("HTTP 500", 500))), patch(STATS):
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.SETUP_RETRY

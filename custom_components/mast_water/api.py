@@ -9,7 +9,7 @@ from typing import Any
 import aiohttp
 
 from .const import API_URL, CARDS_URL, ORIGIN
-from .helpers import Card, Reading, parse_cards, parse_readings
+from .helpers import Card, Reading, clean_token, parse_cards, parse_readings, token_expiry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +24,10 @@ class MastAuthError(MastError):
 
 class MastApiError(MastError):
     """The API returned an error or an unexpected response."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class MastConnectionError(MastError):
@@ -48,6 +52,29 @@ class MastClient:
         self._company = company_id
         self._url = url
         self._cards_url = cards_url
+
+    @property
+    def token(self) -> str:
+        """The token currently in use (may be newer than the one passed in)."""
+        return self._token
+
+    def _adopt_new_token(self, header_value: str | None) -> None:
+        """Take over a renewed token the server sends in the `new-token` header.
+
+        The MAST web app does exactly this on every response (its HTTP
+        interceptor replaces the stored token when the header is present).
+        Only a well-formed JWT that outlives the current one is accepted.
+        """
+        if not header_value:
+            return
+        candidate = clean_token(header_value)
+        new_exp = token_expiry(candidate)
+        if new_exp is None or candidate == self._token:
+            return
+        current_exp = token_expiry(self._token)
+        if current_exp is None or new_exp > current_exp:
+            _LOGGER.debug("MAST sent a renewed token (expires %s)", new_exp)
+            self._token = candidate
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -78,7 +105,8 @@ class MastClient:
                     # The API answers bad card numbers / bad ranges with a
                     # generic 500 and a Hebrew message, so keep the status.
                     _LOGGER.debug("MAST API HTTP %s: %s", status, text[:200])
-                    raise MastApiError(f"HTTP {status}")
+                    raise MastApiError(f"HTTP {status}", status)
+                self._adopt_new_token(resp.headers.get("new-token"))
                 try:
                     return await resp.json(content_type=None)
                 except (aiohttp.ContentTypeError, ValueError) as err:

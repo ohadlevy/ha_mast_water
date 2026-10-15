@@ -14,8 +14,10 @@ data works in the **Energy dashboard** and in long-term statistics.
 MAST has no public API and logs you in with an SMS code plus a Google reCAPTCHA, so a script cannot
 log in by itself (and this project deliberately does not try to). Instead **you log in yourself, in your
 browser**, and the session token the website receives is handed to Home Assistant, either by pasting it or
-automatically with the included userscript. The token lasts about **48 hours** and cannot be renewed
-(see findings), so roughly every two days you log in again. Nothing is lost in between: the next time
+automatically with the included userscript. The token lasts about **48 hours**. The MAST web app can swap in
+a renewed token the server sends in a `new-token` response header, and this integration does the same, so if
+MAST sends it, the session may stay alive without any new login (unconfirmed, see findings). Otherwise you log
+in again roughly every two days. Nothing is lost in between: the next time
 Home Assistant has a valid token it fetches every day since the last import and fills the history in with
 the correct dates.
 
@@ -49,7 +51,8 @@ count in the Energy dashboard.
 4. The last screen shows the **token push URL** for the userscript (next section). You can show it again
    any time: integration menu → **Reconfigure**.
 
-The first run imports up to two years of history in 90-day chunks. Chunks the portal rejects are skipped.
+The first run imports up to two years of history in 30-day requests (the most the MAST web app allows at once; it falls
+back to 7 days automatically for water corporations that only allow that). Ranges with no data are skipped.
 
 ### Step 2 (optional): hands-free token refresh with the userscript
 
@@ -84,12 +87,14 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 ## Limits and good to know
 
 - MAST publishes **one cumulative reading per day**, so the dashboard has daily granularity, and the newest
-  reading is usually about a day old. Usage is attributed to the day of the reading's timestamp. I assumed
-  the reading is the meter value at midnight on that date; compare against a bill or a day you know to confirm.
+  reading is usually about a day old. The web app itself shows each day's consumption as that day's reading
+  minus the previous day's, and the integration attributes usage to days the same way, so the Energy dashboard
+  should match the numbers on the MAST site. Whether the reading is the physical meter value at the start or
+  end of that date is not documented; compare against a bill if the exact day boundary matters to you.
 - The statistic starts at zero at the first imported reading. If the meter is replaced and the reading drops,
   that day adds zero rather than a negative amount.
 - Polls every 6 hours; new data only appears about once a day anyway.
-- Data older than what the portal keeps cannot be imported.
+- The MAST date picker goes back about two years, so that is how much history can be imported.
 
 ## Security notes
 

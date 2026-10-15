@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
-from .api import MastAuthError, MastClient, MastConnectionError, MastError
+from .api import MastApiError, MastAuthError, MastClient, MastConnectionError, MastError
 from .const import (
     CONF_CARD,
     CONF_COMPANY_ID,
@@ -78,6 +78,9 @@ def _make_webhook_handler(entry: ConfigEntry):
             return _reply(401, error="token_rejected")
         except MastConnectionError:
             return _reply(502, error="cannot_reach_mast")
+        except MastApiError as err:
+            if err.status != 404:  # 404 only means "no readings in the last days"
+                return _reply(400, error="token_not_valid_for_this_card")
         except MastError:
             return _reply(400, error="token_not_valid_for_this_card")
 
