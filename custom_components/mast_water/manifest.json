@@ -4,10 +4,10 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["recorder", "webhook"],
-  "documentation": "https://github.com/YOUR_USER/ha-mast-water",
+  "documentation": "https://github.com/ohadlevy/ha-mast-water",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/YOUR_USER/ha-mast-water/issues",
+  "issue_tracker": "https://github.com/ohadlevy/ha-mast-water/issues",
   "requirements": [],
   "version": "0.4.0"
 }
