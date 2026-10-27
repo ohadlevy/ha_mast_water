@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from typing import Any
 
 import aiohttp
 
-from .const import API_URL, CARDS_URL, ORIGIN
+from .const import API_URL, CARDS_URL, ORIGIN, VALIDATE_URL
 from .helpers import Card, Reading, clean_token, parse_cards, parse_readings, token_expiry
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,8 +35,25 @@ class MastConnectionError(MastError):
     """Could not reach the API."""
 
 
+def error_reason(text: str) -> str | None:
+    """Pull the human-readable error out of a MAST JSON error body, if there is one.
+
+    The web app reads `reason` from 401 bodies (for example `"expired"`); other
+    errors carry a `message`.
+    """
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(body, dict):
+        for key in ("reason", "message"):
+            if body.get(key):
+                return str(body[key])[:200]
+    return None
+
+
 class MastClient:
-    """Thin client around the two MAST endpoints this integration needs."""
+    """Thin client around the MAST endpoints this integration needs."""
 
     def __init__(
         self,
@@ -45,6 +63,7 @@ class MastClient:
         company_id: str,
         url: str = API_URL,
         cards_url: str = CARDS_URL,
+        validate_url: str = VALIDATE_URL,
     ) -> None:
         self._session = session
         self._token = token
@@ -52,6 +71,7 @@ class MastClient:
         self._company = company_id
         self._url = url
         self._cards_url = cards_url
+        self._validate_url = validate_url
 
     @property
     def token(self) -> str:
@@ -100,7 +120,14 @@ class MastClient:
                 status = resp.status
                 text = await resp.text()
                 if status in (401, 403):
-                    raise MastAuthError(f"HTTP {status}")
+                    reason = error_reason(text)
+                    if status == 403 and reason is None:
+                        # A 403 without MAST's JSON error body (for example an HTML
+                        # page from the CDN in front of the API) is a block, not an
+                        # expired token, so do not ask the user to log in again.
+                        raise MastApiError("HTTP 403 (blocked, not a MAST error)", status)
+                    detail = f", reason: {reason}" if reason else ""
+                    raise MastAuthError(f"HTTP {status}{detail}")
                 if status >= 400:
                     # The API answers bad card numbers / bad ranges with a
                     # generic 500 and a Hebrew message, so keep the status.
@@ -113,6 +140,23 @@ class MastClient:
                     raise MastApiError("response was not JSON") from err
         except (aiohttp.ClientError, TimeoutError) as err:
             raise MastConnectionError(str(err)) from err
+
+    async def async_restore_session(self) -> bool:
+        """Do what the web app does before it opens the water page.
+
+        A few hours after login MAST drops the server-side state behind the WaterMeter
+        endpoints, which then answer 401 `Expired|NotValid` although the token is still
+        valid. Validating the user's assets and then loading the water cards, in that
+        order, brings it back. Returns False if either call fails or MAST reports the
+        assets as not valid.
+        """
+        try:
+            validation = await self._request("GET", self._validate_url)
+            await self._request("GET", self._cards_url)
+        except MastError as err:
+            _LOGGER.debug("Could not restore the MAST session: %s", err)
+            return False
+        return not (isinstance(validation, dict) and validation.get("isValid") is False)
 
     async def async_get_readings(self, date_from: date, date_to: date) -> list[Reading]:
         """Fetch cumulative daily readings for an inclusive date range."""

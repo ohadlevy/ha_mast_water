@@ -42,15 +42,25 @@ def clean_token(raw: str) -> str:
     return token
 
 
-def token_expiry(token: str) -> datetime | None:
-    """Read the `exp` claim from a JWT without verifying it."""
+def _claim_time(token: str, claim: str) -> datetime | None:
+    """Read a timestamp claim from a JWT without verifying it."""
     try:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload))
-        return datetime.fromtimestamp(int(claims["exp"]), tz=timezone.utc)
+        return datetime.fromtimestamp(int(claims[claim]), tz=timezone.utc)
     except (IndexError, ValueError, KeyError, TypeError):
         return None
+
+
+def token_expiry(token: str) -> datetime | None:
+    """Read the `exp` claim from a JWT without verifying it."""
+    return _claim_time(token, "exp")
+
+
+def token_issued(token: str) -> datetime | None:
+    """Read the `iat` claim from a JWT without verifying it."""
+    return _claim_time(token, "iat")
 
 
 def parse_cards(payload: Any) -> list[Card]:

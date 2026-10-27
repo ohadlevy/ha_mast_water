@@ -86,5 +86,25 @@ class MastSensor(CoordinatorEntity[MastCoordinator], SensorEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """Keep the token sensor visible while polls fail: that is when it is needed."""
+        if self.entity_description.key == "token_expiry":
+            return self.coordinator.data is not None
+        return super().available
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        """For the token sensor: when it was issued and how often MAST renewed it."""
+        if self.entity_description.key != "token_expiry":
+            return None
+        data = self.coordinator.data
+        return {
+            "issued": data.token_issued.isoformat() if data.token_issued else None,
+            "renewals_since_start": data.renewals,
+            "rejections_in_a_row": self.coordinator.auth_failures,
+            "last_rejection": self.coordinator.last_auth_error,
+        }
+
+    @property
     def native_value(self) -> float | datetime | None:
         return self.entity_description.value_fn(self.coordinator.data)

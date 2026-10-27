@@ -17,6 +17,8 @@ from homeassistant.util import dt as dt_util
 
 from .api import MastApiError, MastAuthError, MastClient, MastConnectionError
 from .const import (
+    AUTH_RETRY_SECONDS,
+    AUTH_STRIKES,
     BACKFILL_DAYS,
     CHUNK_DAYS,
     CONF_TOKEN,
@@ -25,7 +27,7 @@ from .const import (
     STORE_VERSION,
     UPDATE_INTERVAL,
 )
-from .helpers import Reading, build_rows, token_expiry
+from .helpers import Reading, build_rows, token_expiry, token_issued
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +45,8 @@ class MastData:
     latest_day: date | None
     daily_usage: float | None
     token_expiry: datetime | None
+    token_issued: datetime | None = None
+    renewals: int = 0
 
 
 def statistic_id(card: str) -> str:
@@ -90,6 +94,32 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         self._expiry = token_expiry(token)
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{card}")
         self._chunk_days = CHUNK_DAYS
+        self._renewals = 0
+        self.auth_failures = 0  # consecutive rejections of a not-yet-expired token
+        self.last_auth_error: str | None = None
+
+    def _token_alive(self) -> bool:
+        return self._expiry is not None and self._expiry > dt_util.utcnow()
+
+    def _auth_exception(self, err: Exception) -> Exception:
+        """Decide how to react when MAST refuses the token.
+
+        A token past its own expiry needs a new login straight away. One that should still be
+        valid is retried later a few times first. The very first refresh (setup) fails fast so
+        that a bad token is reported immediately.
+        """
+        self.auth_failures += 1
+        self.last_auth_error = f"{dt_util.now():%Y-%m-%d %H:%M} {err}"
+        if self._token_alive() and self.data is not None and self.auth_failures < AUTH_STRIKES:
+            _LOGGER.warning(
+                "MAST refused a token that has not expired (%s), retrying in %d minutes (%d/%d)",
+                err, AUTH_RETRY_SECONDS // 60, self.auth_failures, AUTH_STRIKES,
+            )
+            return UpdateFailed(
+                f"MAST refused a token that has not expired ({err})",
+                retry_after=AUTH_RETRY_SECONDS,
+            )
+        return ConfigEntryAuthFailed(f"MAST rejected the token ({err})")
 
     def _persist_renewed_token(self) -> None:
         """Store a token MAST renewed via the `new-token` response header."""
@@ -98,10 +128,26 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         if current == entry.data.get(CONF_TOKEN):
             return
         self._expiry = token_expiry(current)
+        self._renewals += 1
         self.hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_TOKEN: current}
         )
         _LOGGER.info("MAST renewed the session token (expires %s)", self._expiry)
+
+    async def _get_readings(self, start: date, end: date) -> list[Reading]:
+        """Fetch one range. If MAST refuses a token that has not expired, restore the session once."""
+        try:
+            return await self._client.async_get_readings(start, end)
+        except MastAuthError as err:
+            if not self._token_alive():
+                raise
+            restored = await self._client.async_restore_session()
+            _LOGGER.info(
+                "MAST refused a token that has not expired (%s); %s the session, trying again",
+                err,
+                "restored" if restored else "could not restore",
+            )
+            return await self._client.async_get_readings(start, end)
 
     async def _fetch(self, start: date, end: date) -> list[Reading]:
         """Fetch [start, end] in chunks. Old failing chunks are skipped."""
@@ -111,10 +157,10 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         while cursor <= end:
             chunk_end = min(cursor + timedelta(days=self._chunk_days - 1), end)
             try:
-                readings += await self._client.async_get_readings(cursor, chunk_end)
+                readings += await self._get_readings(cursor, chunk_end)
                 last_error = None
             except MastAuthError as err:
-                raise ConfigEntryAuthFailed("MAST token rejected or expired") from err
+                raise self._auth_exception(err) from err
             except MastConnectionError as err:
                 raise UpdateFailed(f"Cannot reach MAST: {err}") from err
             except MastApiError as err:
@@ -174,8 +220,18 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             )
             _LOGGER.debug("Imported %d statistics rows up to %s", len(rows), a_day)
 
+        self.auth_failures = 0
+        self.last_auth_error = None
+        _LOGGER.debug("MAST poll ok: %d readings, latest %s", len(readings), readings[-1].day)
         latest = readings[-1]
         usage = (
             round(latest.value - readings[-2].value, 3) if len(readings) > 1 else None
         )
-        return MastData(latest.value, latest.day, usage, self._expiry)
+        return MastData(
+            latest.value,
+            latest.day,
+            usage,
+            self._expiry,
+            token_issued(self._client.token),
+            self._renewals,
+        )

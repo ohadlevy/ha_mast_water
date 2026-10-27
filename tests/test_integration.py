@@ -437,3 +437,262 @@ async def test_other_errors_on_the_latest_chunk_still_fail_the_update(
     with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastApiError("HTTP 500", 500))), patch(STATS):
         await setup_entry(hass, entry)
     assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
+# ------------------------------------------------------------------ error messages
+
+
+async def _call_with_response(status: int, body: str, content_type: str = "application/json"):
+    from aiohttp import ClientSession, web
+    from aiohttp.test_utils import TestServer
+
+    from custom_components.mast_water.api import MastClient
+
+    async def handler(request):
+        return web.Response(status=status, text=body, content_type=content_type)
+
+    app = web.Application()
+    app.router.add_post("/r", handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with ClientSession() as session:
+            client = MastClient(session, mk_token(48), CARD, "110", server.make_url("/r"))
+            return await client.async_get_readings(date(2026, 10, 1), date(2026, 10, 2))
+    finally:
+        await server.close()
+
+
+async def test_401_message_includes_status_and_reason(socket_enabled):
+    with pytest.raises(MastAuthError, match=r"HTTP 401, reason: expired"):
+        await _call_with_response(401, '{"reason": "expired"}')
+
+
+async def test_403_json_is_auth_but_403_html_is_a_block_not_expiry(socket_enabled):
+    with pytest.raises(MastAuthError, match="HTTP 403"):
+        await _call_with_response(403, '{"message": "no"}')
+    with pytest.raises(MastApiError, match="blocked") as err:
+        await _call_with_response(403, "<html>Just a moment...</html>", "text/html")
+    assert err.value.status == 403 and not isinstance(err.value, MastAuthError)
+
+
+async def test_blocked_403_does_not_start_reauth(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastApiError("HTTP 403 (blocked)", 403))), patch(STATS):
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.SETUP_RETRY  # retried later, no login prompt
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
+async def test_token_sensor_exposes_issue_time_and_renewals(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
+        await setup_entry(hass, entry)
+    reg = er.async_get(hass)
+    state = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry"))
+    assert state.attributes["renewals_since_start"] == 0
+    assert state.attributes["issued"] is None  # test tokens carry no iat claim
+
+
+# ------------------------------------------ refused-but-not-expired tokens are retried
+
+
+async def test_refused_live_token_is_retried_before_asking_for_login(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
+        await setup_entry(hass, entry)
+    coordinator = entry.runtime_data
+    reg = er.async_get(hass)
+    token_sensor = reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry")
+
+    refused = AsyncMock(side_effect=MastAuthError("HTTP 401, reason: expired"))
+    with patch(f"{API}.async_get_readings", refused), patch(STATS):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert coordinator.auth_failures == 1
+        assert not coordinator.last_update_success
+        assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        assert entry.state is ConfigEntryState.LOADED
+        # The token sensor stays visible and explains what happened.
+        state = hass.states.get(token_sensor)
+        assert state.state != "unavailable"
+        assert state.attributes["rejections_in_a_row"] == 1
+        assert "HTTP 401" in state.attributes["last_rejection"]
+
+        await coordinator.async_refresh()
+        assert coordinator.auth_failures == 2
+        assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+        await coordinator.async_refresh()  # third strike
+        await hass.async_block_till_done()
+    assert [f["context"]["source"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)] == [SOURCE_REAUTH]
+
+
+async def test_success_after_a_refusal_resets_the_counter(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
+        await setup_entry(hass, entry)
+        coordinator = entry.runtime_data
+        with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastAuthError("HTTP 401"))):
+            await coordinator.async_refresh()
+        assert coordinator.auth_failures == 1
+        await coordinator.async_refresh()
+    assert coordinator.auth_failures == 0
+    assert coordinator.last_update_success
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
+async def test_refused_token_that_has_expired_asks_for_login_immediately(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
+        await setup_entry(hass, entry)
+        coordinator = entry.runtime_data
+        coordinator._expiry = datetime.now(timezone.utc) - timedelta(minutes=1)
+        # The proactive expiry check fires before any request is made.
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert [f["context"]["source"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)] == [SOURCE_REAUTH]
+
+
+# --------------------------------------------- restoring the MAST session on a refusal
+
+
+from custom_components.mast_water.api import MastClient as _MastClient
+
+_REAL_RESTORE = _MastClient.async_restore_session  # captured before the fixture below replaces it
+
+
+@pytest.fixture(autouse=True)
+def restore():
+    """The session-restoring calls are stubbed so that no coordinator test touches the network."""
+    with patch(f"{API}.async_restore_session", AsyncMock(return_value=True)) as mock:
+        yield mock
+
+
+async def test_refusal_of_a_valid_token_restores_the_session_and_retries(
+    hass: HomeAssistant, recorder_mock, hass_storage, restore
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
+        await setup_entry(hass, entry)
+    coordinator = entry.runtime_data
+    state = {"restored": False}
+
+    async def restore_session():
+        state["restored"] = True
+        return True
+
+    async def refuses_until_restored(self, date_from, date_to):
+        if not state["restored"]:
+            raise MastAuthError("HTTP 401, reason: Expired|NotValid")
+        return await fake_get_readings(self, date_from, date_to)
+
+    restore.side_effect = restore_session
+    with patch(f"{API}.async_get_readings", refuses_until_restored), patch(STATS):
+        await coordinator.async_refresh()
+    assert coordinator.last_update_success
+    assert coordinator.auth_failures == 0
+    restore.assert_awaited_once()
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
+async def test_refusal_that_restoring_does_not_cure_counts_one_strike(
+    hass: HomeAssistant, recorder_mock, hass_storage, restore
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
+        await setup_entry(hass, entry)
+    coordinator = entry.runtime_data
+    refused = AsyncMock(side_effect=MastAuthError("HTTP 401, reason: Expired|NotValid"))
+    with patch(f"{API}.async_get_readings", refused), patch(STATS):
+        await coordinator.async_refresh()
+    assert refused.await_count == 2  # the request and one retry after restoring
+    restore.assert_awaited_once()
+    assert coordinator.auth_failures == 1
+
+
+async def test_expired_token_is_neither_restored_nor_retried(
+    hass: HomeAssistant, recorder_mock, hass_storage, restore
+):
+    entry = make_entry(mk_token(-1))
+    refused = AsyncMock(side_effect=MastAuthError("HTTP 401, reason: expired"))
+    with patch(f"{API}.async_get_readings", refused), patch(STATS):
+        await setup_entry(hass, entry)
+    assert refused.await_count == 0  # caught before any request
+    restore.assert_not_awaited()
+    assert [f["context"]["source"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)] == [SOURCE_REAUTH]
+
+
+async def _restore_with_server(handlers: dict):
+    """Run async_restore_session against a local server; return (result, request paths in order)."""
+    from aiohttp import ClientSession, web
+    from aiohttp.test_utils import TestServer
+
+    from custom_components.mast_water.api import MastClient
+
+    seen: list[str] = []
+
+    def wrap(path):
+        async def handler(request):
+            seen.append(path)
+            return handlers[path](request)
+
+        return handler
+
+    app = web.Application()
+    for path in handlers:
+        app.router.add_get(path, wrap(path))
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with ClientSession() as session:
+            client = MastClient(
+                session, mk_token(48), CARD, "110",
+                cards_url=str(server.make_url("/cards")),
+                validate_url=str(server.make_url("/validate")),
+            )
+            return await _REAL_RESTORE(client), seen
+    finally:
+        await server.close()
+
+
+async def test_restore_session_validates_assets_then_loads_cards(socket_enabled):
+    from aiohttp import web
+
+    ok, seen = await _restore_with_server(
+        {
+            "/validate": lambda r: web.json_response({"isValid": True, "message": None}),
+            "/cards": lambda r: web.json_response([{"waterCardNumber": CARD, "address": "x"}]),
+        }
+    )
+    assert ok is True
+    assert seen == ["/validate", "/cards"]  # in the web app's order
+
+
+async def test_restore_session_reports_failure(socket_enabled):
+    from aiohttp import web
+
+    ok, seen = await _restore_with_server(
+        {
+            "/validate": lambda r: web.json_response({"isValid": False, "message": "no"}),
+            "/cards": lambda r: web.json_response([]),
+        }
+    )
+    assert ok is False
+    ok, seen = await _restore_with_server(
+        {
+            "/validate": lambda r: web.json_response({"reason": "expired"}, status=401),
+            "/cards": lambda r: web.json_response([]),
+        }
+    )
+    assert ok is False and seen == ["/validate"]  # stops at the first failure

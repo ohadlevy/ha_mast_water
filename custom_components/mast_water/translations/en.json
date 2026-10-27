@@ -48,9 +48,15 @@
   },
   "entity": {
     "sensor": {
-      "meter_reading": { "name": "Meter reading" },
-      "daily_usage": { "name": "Latest daily usage" },
-      "token_expiry": { "name": "Token expires" }
+      "meter_reading": {
+        "name": "Meter reading"
+      },
+      "daily_usage": {
+        "name": "Latest daily usage"
+      },
+      "token_expiry": {
+        "name": "Token expires"
+      }
     }
   }
 }
