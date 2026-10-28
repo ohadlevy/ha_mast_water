@@ -54,7 +54,8 @@ def renew_with(token, calls=None):
     return renew
 
 
-async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled):
+@pytest.mark.parametrize("old_token", ["", "expired"])
+async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled, old_token):
     renewed = mk_token(48)
 
     async def resume(request):
@@ -72,7 +73,7 @@ async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled):
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
         client = MastClient(
             session,
-            mk_token(-1),
+            mk_token(-1) if old_token else "",
             CARD,
             "110",
             user_token="remembered-credential",
@@ -252,8 +253,9 @@ async def test_rotated_credentials_survive_subsequent_data_failure(
     assert entry.data[CONF_USER_TOKEN] == "rotated-credential"
 
 
-async def test_initial_flow_accepts_resume_credential_with_expired_jwt(
-    hass, recorder_mock, hass_storage
+@pytest.mark.parametrize("include_expired_jwt", [False, True])
+async def test_initial_flow_accepts_resume_credential_without_valid_jwt(
+    hass, recorder_mock, hass_storage, include_expired_jwt
 ):
     from custom_components.mast_water.helpers import Card
 
@@ -267,13 +269,11 @@ async def test_initial_flow_accepts_resume_credential_with_expired_jwt(
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": SOURCE_USER}
         )
+        user_input = {CONF_USER_TOKEN: "remembered-credential", "company_id": "110"}
+        if include_expired_jwt:
+            user_input[CONF_TOKEN] = mk_token(-1)
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {
-                CONF_TOKEN: mk_token(-1),
-                CONF_USER_TOKEN: "remembered-credential",
-                "company_id": "110",
-            },
+            result["flow_id"], user_input
         )
         assert result["step_id"] == "webhook"
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
@@ -379,9 +379,9 @@ async def test_early_server_rejection_renews_before_requesting_otp(
     assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
 
 
-@pytest.mark.parametrize("include_resume", [True, False])
+@pytest.mark.parametrize("mode", ["resume_only", "resume_with_expired_jwt", "jwt_only"])
 async def test_reauthentication_can_replace_or_clear_rejected_resume_credential(
-    hass, recorder_mock, hass_storage, include_resume
+    hass, recorder_mock, hass_storage, mode
 ):
     from custom_components.mast_water.helpers import Card
 
@@ -397,9 +397,12 @@ async def test_reauthentication_can_replace_or_clear_rejected_resume_credential(
     flow = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]
     assert flow["context"]["source"] == SOURCE_REAUTH
     renewed = mk_token(48)
-    user_input = {CONF_TOKEN: mk_token(-1) if include_resume else renewed}
+    include_resume = mode != "jwt_only"
+    user_input = {} if include_resume else {CONF_TOKEN: renewed}
     if include_resume:
         user_input[CONF_USER_TOKEN] = "new-remembered-credential"
+    if mode == "resume_with_expired_jwt":
+        user_input[CONF_TOKEN] = mk_token(-1)
     with (
         patch(f"{API}.async_resume_session", renew_with(renewed)),
         patch(f"{API}.async_get_cards", AsyncMock(return_value=[Card(CARD, "Test")])),

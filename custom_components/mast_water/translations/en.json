@@ -3,11 +3,11 @@
     "step": {
       "user": {
         "title": "MAST water meter",
-        "description": "Paste the current jwt token from your MAST browser login. Add the optional remembered-login token to let Home Assistant renew the session automatically, or let the userscript capture both credentials (see the README).",
+        "description": "Paste the session renewal token (user.token) from MAST to let Home Assistant obtain and renew JWTs automatically. Alternatively, paste a JWT, which expires after 48 hours. See the README for browser steps.",
         "data": {
-          "token": "jwt token",
+          "token": "JWT token (optional with session renewal token)",
           "company_id": "Company ID (X-CompanyId)",
-          "user_token": "Session renewal token (user.token, optional)"
+          "user_token": "Session renewal token (user.token)"
         }
       },
       "card": {
@@ -30,14 +30,15 @@
       },
       "reauth_confirm": {
         "title": "MAST session needs sign-in",
-        "description": "MAST could not renew this session. Sign in at mast.co.il with the userscript installed, or paste a fresh jwt token and optional session renewal token.",
+        "description": "MAST could not renew this session. Sign in at mast.co.il, then paste the session renewal token or a fresh JWT. The userscript can also send both credentials.",
         "data": {
-          "token": "jwt token",
-          "user_token": "Session renewal token (user.token, optional)"
+          "token": "JWT token (optional with session renewal token)",
+          "user_token": "Session renewal token (user.token)"
         }
       }
     },
     "error": {
+      "missing_credentials": "Enter a session renewal token or a JWT.",
       "invalid_token": "That does not look like a JWT token.",
       "token_expired": "That JWT has expired. Add a session renewal token or copy a fresh JWT.",
       "invalid_auth": "MAST rejected the token.",

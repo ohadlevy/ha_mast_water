@@ -11,12 +11,12 @@ the **Energy dashboard** and in long-term statistics.
 ## How it works
 
 MAST has no documented public API. Initial login uses an SMS code plus a Google reCAPTCHA.
-**You log in yourself, in your browser.** The session token the website receives is handed to Home Assistant,
-either by pasting it or automatically with the included userscript. The JWT lasts **48 hours**.
+**You log in yourself, in your browser.** MAST uses a JWT for water API requests and a separate
+remembered-login token (`user.token`) that can obtain new JWTs. The JWT lasts **48 hours**.
 
-Supply the separate **session renewal token** (`user.token`) once, or let the userscript capture it.
-Home Assistant then exchanges it for a new JWT during the final 12 hours of validity. This flow was verified
-twice against MAST without another OTP. The renewal credential's server lifetime is still unknown; if MAST
+Supply `user.token` during setup, or let the userscript capture it. Home Assistant obtains the first JWT from
+it and exchanges it again during the final 12 hours of each JWT's validity. This flow was verified repeatedly
+against MAST without another OTP. The renewal credential's server lifetime is still unknown; if MAST
 rejects it, the integration asks you to sign in again. See [the auth research](docs/AUTH_RESEARCH.md).
 
 If a session cannot be renewed, the next time Home Assistant has a valid token it fetches every day since the
@@ -47,14 +47,16 @@ the Energy dashboard.
 
 ## Setup
 
-### Step 1: first token (manual, one time)
+### Step 1: connect your MAST session (manual, one time)
 
 1. Log in at <https://www.mast.co.il> and open your water consumption page.
-2. Open browser DevTools → **Network**, click any request to `api.mast.co.il`, and copy the value of the `jwt`
-   request header (with or without the `Bearer ` prefix).
-3. Paste it into the integration. It then lists your water cards, so you pick one instead of typing a number.
-   To enable automatic renewal, also fill in **Session renewal token** using the browser value from
-   `JSON.parse(localStorage.getItem('user')).token`, or use the userscript below.
+2. Open browser DevTools → **Console** and run
+   `copy(JSON.parse(localStorage.getItem('user') || '{}').token)`. Paste the copied value into
+   **Session renewal token** in the integration, leaving **JWT token** empty. Home Assistant obtains a JWT and
+   lists your water cards. Clear your clipboard after pasting.
+3. If `user.token` is unavailable, open DevTools → **Network**, click a request to `api.mast.co.il`, and paste
+   its `jwt` request header instead. This JWT expires after 48 hours; you can add `user.token` later through
+   **Reconfigure** to enable automatic renewal.
 4. The last screen shows the **token push URL** for the userscript. You can show it again any time:
    integration menu → **Reconfigure**.
 
@@ -91,8 +93,8 @@ reload MAST while still logged in. No additional OTP is needed while that browse
 
 ### If you skip the userscript
 
-You can provide the renewal credential manually during setup or Reconfigure. If only a JWT is configured,
-Home Assistant asks for a fresh token when it expires, as in earlier releases.
+You can provide `user.token` manually during setup or Reconfigure without copying a JWT. If only a JWT is
+configured, Home Assistant asks for a fresh token when it expires, as in earlier releases.
 
 ## Using it in the Energy dashboard
 

@@ -16,7 +16,11 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mast_water.api import MastApiError, MastAuthError
+from custom_components.mast_water.api import (
+    MastApiError,
+    MastAuthError,
+    MastClient as _MastClient,
+)
 from custom_components.mast_water.const import (
     CONF_CARD,
     CONF_COMPANY_ID,
@@ -142,7 +146,11 @@ async def test_config_flow_multiple_cards_shows_picker(
 
 @pytest.mark.parametrize(
     ("token", "error"),
-    [("not a jwt", "invalid_token"), (mk_token(-1), "token_expired")],
+    [
+        ("", "missing_credentials"),
+        ("not a jwt", "invalid_token"),
+        (mk_token(-1), "token_expired"),
+    ],
 )
 async def test_config_flow_bad_tokens(hass: HomeAssistant, token, error):
     result = await hass.config_entries.flow.async_init(
@@ -567,8 +575,6 @@ async def test_refused_token_that_has_expired_asks_for_login_immediately(
 
 # --------------------------------------------- restoring the MAST session on a refusal
 
-
-from custom_components.mast_water.api import MastClient as _MastClient
 
 _REAL_RESTORE = _MastClient.async_restore_session  # captured before the fixture below replaces it
 

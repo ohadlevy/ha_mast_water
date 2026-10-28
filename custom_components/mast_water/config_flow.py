@@ -1,4 +1,4 @@
-"""Config flow: paste a token, pick the card, get the webhook URL for the userscript."""
+"""Config flow: provide a session credential, pick the card, get the webhook URL."""
 
 from __future__ import annotations
 
@@ -109,13 +109,15 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            token = clean_token(user_input[CONF_TOKEN])
+            token = clean_token(user_input.get(CONF_TOKEN, ""))
             company = user_input[CONF_COMPANY_ID].strip()
             user_token = user_input.get(CONF_USER_TOKEN, "").strip()
             expiry = token_expiry(token)
-            if expiry is None:
+            if not token and not user_token:
+                errors["base"] = "missing_credentials"
+            elif not user_token and expiry is None:
                 errors["base"] = "invalid_token"
-            elif expiry <= dt_util.utcnow() and not user_token:
+            elif not user_token and expiry <= dt_util.utcnow():
                 errors["base"] = "token_expired"
             else:
                 client = MastClient(
@@ -155,7 +157,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TOKEN): str,
+                    vol.Optional(CONF_TOKEN): str,
                     vol.Optional(CONF_USER_TOKEN): USER_TOKEN_SELECTOR,
                     vol.Required(CONF_COMPANY_ID, default=DEFAULT_COMPANY_ID): str,
                 }
@@ -274,10 +276,12 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         entry = self._get_reauth_entry()
         if user_input is not None:
-            token = clean_token(user_input[CONF_TOKEN])
+            token = clean_token(user_input.get(CONF_TOKEN, ""))
             user_token = user_input.get(CONF_USER_TOKEN, "").strip()
             updates = {CONF_TOKEN: token, CONF_USER_TOKEN: ""}
-            if user_token:
+            if not token and not user_token:
+                errors["base"] = "missing_credentials"
+            elif user_token:
                 try:
                     updates = await _resume_credentials(
                         self.hass,
@@ -305,7 +309,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TOKEN): str,
+                    vol.Optional(CONF_TOKEN): str,
                     vol.Optional(CONF_USER_TOKEN): USER_TOKEN_SELECTOR,
                 }
             ),

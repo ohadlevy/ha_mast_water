@@ -1,7 +1,7 @@
 # MAST session resume investigation, 2026-10-27
 
 There is a token-based login path in the public frontend that the initial loaded-bundle review missed.
-Two real exchanges using the account owner's supplied remembered-login credential successfully renewed the
+Repeated real exchanges using the account owner's supplied remembered-login credential successfully renewed the
 JWT without another OTP. Automatic renewal is implemented in component 0.5.0. The opaque credential's lifetime
 and renewal after the original JWT expires still need observation over time.
 
@@ -62,13 +62,16 @@ the old JWT or cookies, using the probe and then the actual integration client:
 | Water-card list | HTTP 200; one accessible card |
 | `PersonalAreaAsset/GetWaterPeriods` | Successful list response with both the original and renewed JWT |
 
-Daily readings returned HTTP 500 with both the original and renewed JWT, including after session restoration
-and for 7-day/30-day ranges with the renewed JWT. This is a separate existing API/data issue; the token exchange
-did not introduce it. No personal response values were printed or added to the repository.
+Initial daily-reading requests returned HTTP 500 with both the original and renewed JWT, including after
+session restoration and for 7-day/30-day ranges. After the account owner logged out and completed another OTP
+login, the previously captured `user.token` still resumed the session and remained unchanged in the response.
+On 2026-10-28, both 7-day and 30-day daily-reading requests then returned HTTP 200 with cumulative readings.
+The cause of the earlier HTTP 500 responses is unknown. No personal response values were added to the repository.
 
-Successful renewal and repeatability over a short interval are established. The opaque-token lifetime and
-post-expiry behavior are not. Periodic renewal before expiry can avoid routine JWT-expiry logins while MAST
-continues accepting that credential.
+Further resume calls advanced the JWT expiry from 2026-10-30 07:50:22 UTC to 12:42:55 and then 14:47:05,
+with the opaque token unchanged. These checks establish repeatability over a short interval. The opaque
+token's lifetime and post-expiry behavior remain unknown. Periodic renewal before expiry can avoid routine
+JWT-expiry logins while MAST continues accepting that credential.
 
 ## Repeating the account test
 
@@ -111,7 +114,8 @@ the returned JWT. Repeat later using the saved credentials and a new output path
 and token lifetime. A successful exchange after the original JWT expires would establish post-expiry resume.
 Changing JWT timestamps locally does not simulate server expiry because it invalidates the signature.
 
-The integration captures the opaque credential through setup, Reconfigure, or userscript version 0.3.0.
+The integration accepts the opaque credential alone during setup or reauthentication and obtains a JWT from it.
+It also captures the credential through Reconfigure or userscript version 0.3.0.
 New credentials are validated against the configured meter. It renews within 12 hours of JWT expiry,
 persists rotated credentials, and falls back to HA reauthentication when a resume credential is rejected and
 the JWT is unusable. Network/server errors are retried rather than immediately requesting another OTP.
