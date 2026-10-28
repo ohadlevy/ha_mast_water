@@ -208,15 +208,11 @@ class MastClient:
         A few hours after login MAST drops the server-side state behind the WaterMeter
         endpoints, which then answer 401 `Expired|NotValid` although the token is still
         valid. Validating the user's assets and then loading the water cards, in that
-        order, brings it back. Returns False if either call fails or MAST reports the
-        assets as not valid.
+        order, brings it back. Returns False only when MAST reports the assets
+        as invalid. Request failures retain their own error type.
         """
-        try:
-            validation = await self._request("GET", self._validate_url)
-            await self._request("GET", self._cards_url)
-        except MastError as err:
-            _LOGGER.debug("Could not restore the MAST session: %s", err)
-            return False
+        validation = await self._request("GET", self._validate_url)
+        await self._request("GET", self._cards_url)
         return not (isinstance(validation, dict) and validation.get("isValid") is False)
 
     async def async_get_readings(self, date_from: date, date_to: date) -> list[Reading]:

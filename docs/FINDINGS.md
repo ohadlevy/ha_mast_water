@@ -103,6 +103,20 @@ enforces it, and does not try to read the SMS. Fresh login is performed by the u
 site's own token-based session-resume flow uses a credential obtained from a successful login and does not
 involve automating an OTP challenge.
 
+### Renewal verification status (2026-10-28)
+
+- Repeated manual `GetUserByToken` exchanges returned working JWTs with later expiries and no OTP. On
+  2026-10-28 at 20:09 UTC, the original session token still resumed about 23 hours after issuance; the
+  returned JWT expired on 2026-10-30 at 20:09 UTC. These exchanges occurred before the original JWT
+  expired, and the opaque token was unchanged.
+- The same `user.token` worked after one browser logout followed by a new OTP login. This is one observation,
+  not evidence that logout never revokes it.
+- Automatic renewal during Home Assistant's first 12-hour renewal window (about 36 hours after a fresh JWT
+  was issued) has not yet been observed in an unattended installation. Renewal after the original JWT expires
+  has not yet been observed either. The tests cover both paths with a mocked MAST API.
+- The server lifetime of `user.token`, and whether repeated renewal extends it, are unknown. Keep the
+  12-hour `TOKEN_RENEWAL_WINDOW` until a real renewal window and post-expiry exchange can be measured.
+
 ## Session restore
 
 A few hours after login the `WaterMeter` endpoints start answering 401 `Expired|NotValid` while the token itself

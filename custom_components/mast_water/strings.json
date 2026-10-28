@@ -3,11 +3,10 @@
     "step": {
       "user": {
         "title": "MAST water meter",
-        "description": "Sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result into Session renewal token. Leave JWT token empty; Home Assistant obtains it automatically. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet into the console. You can also provide a JWT instead.",
+        "description": "Sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result into Session token. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet into the console.",
         "data": {
-          "token": "JWT token (optional with session renewal token)",
           "company_id": "Company ID (X-CompanyId)",
-          "user_token": "Session renewal token (user.token)"
+          "user_token": "Session token (user.token)"
         }
       },
       "card": {
@@ -17,35 +16,30 @@
           "card_number": "Water card"
         }
       },
-      "webhook": {
-        "title": "Token push URL (optional)",
-        "description": "To send the JWT and session renewal token to Home Assistant automatically, install the userscript from the README and give it one of these URLs. Treat the URL as a secret: anyone who has it can push a token (it is only accepted if it works for your card).\n\nSame network as Home Assistant:\n`{internal_url}`\n\nFrom anywhere:\n`{external_url}`\n\nYou can show these again later via the integration's menu → Reconfigure."
-      },
       "reconfigure": {
-        "title": "Automatic renewal and token push",
-        "description": "To enable automatic renewal, paste the remembered-login token from MAST (see the README). Leave it blank to keep the current credentials. The userscript can also send it automatically using one of these URLs. Treat the URLs as secrets.\n\nSame network as Home Assistant:\n`{internal_url}`\n\nFrom anywhere:\n`{external_url}`",
+        "title": "Update session token",
+        "description": "To update the session token, sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result below. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet. Leave blank to keep the current token.",
         "data": {
-          "user_token": "Session renewal token (user.token, optional)"
+          "user_token": "Session token (user.token, optional)"
         }
       },
       "reauth_confirm": {
         "title": "MAST session needs sign-in",
-        "description": "MAST could not renew this session. Sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result into Session renewal token. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet. You can also paste a fresh JWT or use the optional userscript.",
+        "description": "MAST could not renew this session. Sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result into Session token. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet.",
         "data": {
-          "token": "JWT token (optional with session renewal token)",
-          "user_token": "Session renewal token (user.token)"
+          "user_token": "Session token (user.token)"
         }
       }
     },
     "error": {
-      "missing_credentials": "Enter a session renewal token or a JWT.",
-      "invalid_token": "That does not look like a JWT token.",
-      "token_expired": "That JWT has expired. Add a session renewal token or copy a fresh JWT.",
       "invalid_auth": "MAST rejected the token.",
       "invalid_card": "MAST returned an error. Check the card number.",
       "cannot_connect": "Could not reach api.mast.co.il.",
       "no_data": "The request worked but returned no readings.",
-      "invalid_user_token": "MAST rejected the session renewal token or it cannot access this water card."
+      "invalid_user_token": "MAST rejected the session token or it cannot access this water card.",
+      "session_token_required": "Paste the session token.",
+      "assets_invalid": "MAST says the account assets are not valid.",
+      "mast_error": "MAST returned an error. Try again."
     },
     "abort": {
       "already_configured": "This water card is already configured.",
@@ -62,7 +56,7 @@
         "name": "Latest daily usage"
       },
       "token_expiry": {
-        "name": "Token expires"
+        "name": "Access token expires"
       }
     }
   }

@@ -3,7 +3,7 @@
   "name": "MAST Water",
   "codeowners": [],
   "config_flow": true,
-  "dependencies": ["recorder", "webhook"],
+  "dependencies": ["recorder"],
   "documentation": "https://github.com/ohadlevy/ha-mast-water",
   "integration_type": "device",
   "iot_class": "cloud_polling",

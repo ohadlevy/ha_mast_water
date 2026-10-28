@@ -14,7 +14,7 @@ MAST has no documented public API. Initial login uses an SMS code plus a Google 
 **You log in yourself, in your browser.** MAST uses a JWT for water API requests and a separate
 remembered-login token (`user.token`) that can obtain new JWTs. The JWT lasts **48 hours**.
 
-Supply `user.token` during setup, or let the userscript capture it. Home Assistant obtains the first JWT from
+Supply `user.token` during setup. Home Assistant obtains the first JWT from
 it and exchanges it again during the final 12 hours of each JWT's validity. This flow was verified repeatedly
 against MAST without another OTP. The renewal credential's server lifetime is still unknown; if MAST
 rejects it, the integration asks you to sign in again. See [the API findings](docs/FINDINGS.md#authentication).
@@ -33,7 +33,7 @@ water page, and retries.
 | Statistic `mast_water:meter_<card>` ("MAST water meter", m³) | The full history. **Use this in the Energy dashboard.** |
 | Sensor *Meter reading* | Latest cumulative reading (m³) |
 | Sensor *Latest daily usage* | Difference between the two most recent daily readings (m³) |
-| Sensor *Token expires* (diagnostic) | When the current token stops working. Attributes: `issued`, `renewals_since_start`, `rejections_in_a_row`, `last_rejection` |
+| Sensor *Access token expires* (diagnostic) | When the current JWT expires. Attributes: `issued`, `renewals_since_start`, `rejections_in_a_row`, `last_rejection` |
 
 The sensors deliberately have no state class, so they do not create a second series that would double count in
 the Energy dashboard.
@@ -47,54 +47,24 @@ the Energy dashboard.
 
 ## Setup
 
-### Step 1: connect your MAST session (manual, one time)
+### Connect your MAST session (manual, one time)
 
 1. Log in at <https://www.mast.co.il> and open your water consumption page.
 2. Open browser DevTools → **Console** and run
-   `copy(JSON.parse(localStorage.getItem('user') || '{}').token)`. Paste the copied value into
-   **Session renewal token** in the integration, leaving **JWT token** empty. Home Assistant obtains a JWT and
-   lists your water cards. Clear your clipboard after pasting.
-3. If `user.token` is unavailable, open DevTools → **Network**, click a request to `api.mast.co.il`, and paste
-   its `jwt` request header instead. This JWT expires after 48 hours; you can add `user.token` later through
-   **Reconfigure** to enable automatic renewal.
-4. The last screen shows the **token push URL** for the userscript. You can show it again any time:
-   integration menu → **Reconfigure**.
+   `copy(JSON.parse(localStorage.getItem('user')||'{}').token)`. Chrome and Firefox may ask you to type
+   `allow pasting` before pasting the snippet. Paste the copied value into **Session token** in the
+   integration, then clear your clipboard. Home Assistant obtains a JWT and lists your water cards.
+3. Choose your water card if the account has more than one.
 
 The first run imports up to two years of history in 30-day requests (the most the MAST web app allows at once;
 it falls back to 7 days for water corporations that only allow that). Ranges with no data are skipped.
 
-### Step 2 (optional): hands-free token hand-over with the userscript
-
-The userscript sends both credentials from your existing browser login. Home Assistant renews the session
-afterwards without needing the browser to remain open.
-
-1. Install a userscript manager such as Tampermonkey in the browser you use for MAST.
-2. Create a new script from the optional [`contrib/mast-token-push.user.js`](contrib/mast-token-push.user.js).
-3. Set `HA_WEBHOOK_URL` near the top to the URL from the integration, and replace `YOUR_HA_HOST` in the
-   `@connect` line with its host name. Use the **internal** URL if you usually log in from home, the
-   **external** one if you want it to work anywhere.
-4. Open MAST while logged in, or sign in if needed. You will see a small "MAST session sent to Home Assistant"
-   toast. Use userscript version **0.3.0** or later to include the renewal credential.
-
-The userscript watches the site's JWT headers and login storage, and posts each new credential pair to your
-webhook. It does not log in, fill or solve a captcha, or read SMS.
-
-Home Assistant verifies a pushed renewal credential by exchanging it and checking access to the configured
-water card. The same JWT can be pushed again to add a missing renewal credential. A pushed JWT is never allowed
-to replace a newer stored JWT. Accepted credentials are stored together and the integration is reloaded,
-which also resolves an open reauthentication prompt.
-
 ### Enable renewal on an existing installation
 
 After updating the component to **0.5.0** or later and restarting Home Assistant, open the integration menu →
-**Reconfigure**. Paste the `user.token` value from your logged-in browser into **Session renewal token** and
-submit. Home Assistant verifies meter access before storing it. Alternatively, update the userscript and
-reload MAST while still logged in. No additional OTP is needed while that browser session is valid.
-
-### If you skip the userscript
-
-You can provide `user.token` manually during setup or Reconfigure without copying a JWT. If only a JWT is
-configured, Home Assistant asks for a fresh token when it expires, as in earlier releases.
+**Reconfigure**. Paste the `user.token` value from your logged-in browser into **Session token** and
+submit. Home Assistant verifies meter access before storing it. An existing entry with only a JWT keeps
+working until that JWT expires; reauthentication then asks for the session token.
 
 ## Using it in the Energy dashboard
 
@@ -116,27 +86,21 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 
 ## Security
 
-- The token is a login for your MAST account until it expires. **Logging out does not invalidate it**, so treat
-  it like a password for 48 hours.
-- It also contains a user identifier (probably your ID number) and your phone number in readable form (a JWT is
+- The JWT contains a user identifier (probably your ID number) and your phone number in readable form (a JWT is
   only encoded, not encrypted). Redact it before sharing logs, screenshots or HAR files.
-- The session renewal token can obtain new JWTs; treat it as a password. Its server lifetime is unknown.
+- The session token can obtain new JWTs. **Treat it as a password.** Home Assistant stores it in plain text
+  in `.storage`; do not share backups or logs containing it. Its server lifetime is unknown.
 - MAST may revoke the session renewal token after logout. It survived one observed logout and new OTP login,
   but its behavior across other sessions has not been established.
-- Home Assistant stores both credentials in `.storage` in plain text, like other integration credentials.
-  Do not share backups.
-- The webhook URL is a secret. Anyone with it can try to push a token, but only a token that works for your card is
-  accepted. Regenerate it by removing and re-adding the integration.
-- Everything stays between your Home Assistant, MAST and your browser. Nothing is sent anywhere else.
+- Everything stays between your Home Assistant, MAST and your browser.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
 | "MAST returned an error" when adding | Wrong card, a MAST backend problem, or unavailable meter data. HTTP 500 is generic and does not prove the token is invalid. |
-| Re-authentication prompt every 2 days | Only a JWT is configured, or MAST rejected the renewal credential. Add it through Reconfigure or the updated userscript. |
-| Userscript toast never appears | `HA_WEBHOOK_URL` wrong or unreachable from the browser; open the browser console and look for `[mast-token-push]`. |
-| Webhook answers 400 `token_not_valid_for_this_card` | The token belongs to a different MAST account than the configured card. |
+| Re-authentication prompt every 2 days | Only a JWT is configured, or MAST rejected the session token. Add it through Reconfigure. |
+| "MAST says the account assets are not valid" | MAST explicitly rejected the account's water assets during session restore; check the account and water access on the website. |
 | Data stops, no prompt | MAST or session renewal may be temporarily unavailable. Network errors are retried without immediately requesting OTP. |
 | Log: `MAST refused a token that has not expired (...); restored the session, trying again` | Normal. MAST had dropped its session state and the integration repaired it. |
 | Log: `... retrying in 30 minutes (n/3)` | MAST still refused after the repair. After three tries in a row you are asked to log in again. |
@@ -157,10 +121,10 @@ Remove the integration, delete the `mast_water:meter_<card>` statistic (Develope
 ## Development
 
 `custom_components/mast_water/helpers.py` has no Home Assistant imports, so the parsing and statistics logic can
-be unit tested on its own. `tests/` runs the config flow, setup, statistics import, token webhook, session repair
+be unit tested on its own. `tests/` runs the config flow, setup, statistics import, session repair
 and re-authentication inside a real Home Assistant with the MAST API mocked. Renewal tests cover expired JWTs,
-opaque-token rotation, failure handling, and credential binding to a meter. Tested against Home Assistant
-2026.10.4:
+opaque-token rotation, failure handling, and credential binding to a meter. The current suite has 57 passing
+tests against Home Assistant 2026.10.4:
 
 ```bash
 pip install pytest-homeassistant-custom-component

@@ -29,9 +29,7 @@ from .test_integration import (
     fake_get_readings,
     make_entry,
     mk_token,
-    post,
     setup_entry,
-    webhook_client,
 )
 
 
@@ -256,9 +254,8 @@ async def test_rotated_credentials_survive_subsequent_data_failure(
     assert entry.data[CONF_USER_TOKEN] == "rotated-credential"
 
 
-@pytest.mark.parametrize("include_expired_jwt", [False, True])
 async def test_initial_flow_accepts_resume_credential_without_valid_jwt(
-    hass, recorder_mock, hass_storage, include_expired_jwt
+    hass, recorder_mock, hass_storage
 ):
     from custom_components.mast_water.helpers import Card
 
@@ -288,18 +285,112 @@ async def test_initial_flow_accepts_resume_credential_without_valid_jwt(
             DOMAIN, context={"source": SOURCE_USER}
         )
         user_input = {CONF_USER_TOKEN: "remembered-credential", "company_id": "110"}
-        if include_expired_jwt:
-            user_input[CONF_TOKEN] = mk_token(-1)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input
         )
-        assert result["step_id"] == "webhook"
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_TOKEN] == renewed
         assert result["data"][CONF_USER_TOKEN] == "rotated-credential"
         await hass.async_block_till_done()
     assert calls[:3] == ["resume", "restore", "cards"]
+
+
+async def test_setup_form_requires_only_session_token(hass):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    fields = {key.schema for key in result["data_schema"].schema}
+    assert CONF_USER_TOKEN in fields
+    assert CONF_TOKEN not in fields
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USER_TOKEN: "", "company_id": "110"}
+    )
+    assert result["errors"] == {"base": "session_token_required"}
+
+
+async def test_setup_keeps_multiple_card_picker(hass):
+    from custom_components.mast_water.helpers import Card
+
+    cards = [Card("111", "A"), Card("222", "B")]
+    with (
+        patch(f"{API}.async_resume_session", renew_with(mk_token(48))),
+        patch(f"{API}.async_restore_session", AsyncMock(return_value=True)),
+        patch(f"{API}.async_get_cards", AsyncMock(return_value=cards)),
+        patch(f"{API}.async_get_readings", fake_get_readings),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_USER_TOKEN: "credential", "company_id": "110"}
+        )
+        assert result["step_id"] == "card"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"card_number": "222"}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["card_number"] == "222"
+
+
+@pytest.mark.parametrize(
+    ("stage", "failure", "expected"),
+    [
+        ("resume", MastAuthError("rejected"), "invalid_user_token"),
+        ("restore", False, "assets_invalid"),
+        ("restore", MastConnectionError("offline"), "cannot_connect"),
+        ("restore", MastApiError("HTTP 500", 500), "mast_error"),
+    ],
+)
+async def test_setup_reports_resume_and_restore_failures(
+    hass, stage, failure, expected
+):
+    resume = AsyncMock(side_effect=failure if stage == "resume" else None)
+    restore = AsyncMock(
+        side_effect=failure
+        if stage == "restore" and isinstance(failure, Exception)
+        else None,
+        return_value=failure if failure is False else True,
+    )
+    with (
+        patch(f"{API}.async_resume_session", resume),
+        patch(f"{API}.async_restore_session", restore),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_USER_TOKEN: "credential", "company_id": "110"}
+        )
+    assert result["errors"] == {"base": expected}
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (False, "assets_invalid"),
+        (MastConnectionError("offline"), "cannot_connect"),
+        (MastApiError("HTTP 500", 500), "mast_error"),
+    ],
+)
+async def test_reconfigure_reports_restore_failures(hass, failure, expected):
+    entry = make_entry(mk_token(-1))
+    entry.add_to_hass(hass)
+    restore = AsyncMock(
+        side_effect=failure if isinstance(failure, Exception) else None,
+        return_value=failure if failure is False else True,
+    )
+    with (
+        patch(f"{API}.async_resume_session", renew_with(mk_token(48))),
+        patch(f"{API}.async_restore_session", restore),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_USER_TOKEN: "credential"}
+        )
+    assert result["errors"] == {"base": expected}
+    assert CONF_USER_TOKEN not in entry.data
 
 
 @pytest.mark.parametrize("card_matches", [True, False])
@@ -350,46 +441,9 @@ async def test_reconfigure_validates_resume_credential_for_existing_meter(
     assert calls[:3] == ["resume", "restore", "cards"]
 
 
-@pytest.mark.parametrize("card_result", ["match", "different", "missing"])
-async def test_webhook_can_add_resume_credential_with_same_jwt(
-    hass, hass_client_no_auth, recorder_mock, hass_storage, card_result
-):
-    from homeassistant.components import webhook
-    from custom_components.mast_water.helpers import Card
-
-    entry = make_entry(mk_token(48))
-    old = entry.data[CONF_TOKEN]
-    client = await webhook_client(hass, hass_client_no_auth)
-    cards = AsyncMock(
-        return_value=[Card(CARD if card_result == "match" else "other", "Test")]
-    )
-    if card_result == "missing":
-        cards.side_effect = MastApiError("HTTP 404", 404)
-    with (
-        patch(f"{API}.async_resume_session", renew_with(mk_token(49))),
-        patch(f"{API}.async_get_cards", cards),
-        patch(f"{API}.async_restore_session", AsyncMock(return_value=True)),
-        patch(f"{API}.async_get_readings", fake_get_readings),
-        patch(STATS),
-    ):
-        await setup_entry(hass, entry)
-        status, body = await post(
-            client,
-            webhook.async_generate_path(entry.data["webhook_id"]),
-            {"token": old, "user_token": "remembered-credential"},
-        )
-        await hass.async_block_till_done()
-    if card_result == "match":
-        assert status == 200 and body["changed"] is True
-        assert entry.data[CONF_USER_TOKEN] == "rotated-credential"
-    else:
-        assert status == 400
-        assert entry.data[CONF_TOKEN] == old
-        assert CONF_USER_TOKEN not in entry.data
-
-
+@pytest.mark.parametrize("restore_rejects", [False, True])
 async def test_early_server_rejection_renews_before_requesting_otp(
-    hass, recorder_mock, hass_storage
+    hass, recorder_mock, hass_storage, restore_rejects
 ):
     old, renewed = mk_token(48), mk_token(49)
     entry = renewable_entry(old)
@@ -399,9 +453,13 @@ async def test_early_server_rejection_renews_before_requesting_otp(
             raise MastAuthError("HTTP 401")
         return await fake_get_readings(self, date_from, date_to)
 
+    restore = AsyncMock(
+        side_effect=[MastAuthError("HTTP 401"), True] if restore_rejects else None,
+        return_value=True,
+    )
     with (
         patch(f"{API}.async_resume_session", renew_with(renewed)),
-        patch(f"{API}.async_restore_session", AsyncMock(return_value=True)),
+        patch(f"{API}.async_restore_session", restore),
         patch(f"{API}.async_get_readings", readings_require_new_jwt),
         patch(STATS),
     ):
@@ -411,9 +469,8 @@ async def test_early_server_rejection_renews_before_requesting_otp(
     assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
 
 
-@pytest.mark.parametrize("mode", ["resume_only", "resume_with_expired_jwt", "jwt_only"])
-async def test_reauthentication_can_replace_or_clear_rejected_resume_credential(
-    hass, recorder_mock, hass_storage, mode
+async def test_reauthentication_replaces_rejected_resume_credential(
+    hass, recorder_mock, hass_storage
 ):
     from custom_components.mast_water.helpers import Card
 
@@ -429,12 +486,6 @@ async def test_reauthentication_can_replace_or_clear_rejected_resume_credential(
     flow = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]
     assert flow["context"]["source"] == SOURCE_REAUTH
     renewed = mk_token(48)
-    include_resume = mode != "jwt_only"
-    user_input = {} if include_resume else {CONF_TOKEN: renewed}
-    if include_resume:
-        user_input[CONF_USER_TOKEN] = "new-remembered-credential"
-    if mode == "resume_with_expired_jwt":
-        user_input[CONF_TOKEN] = mk_token(-1)
     with (
         patch(f"{API}.async_resume_session", renew_with(renewed)),
         patch(f"{API}.async_restore_session", AsyncMock(return_value=True)),
@@ -443,40 +494,62 @@ async def test_reauthentication_can_replace_or_clear_rejected_resume_credential(
         patch(STATS),
     ):
         result = await hass.config_entries.flow.async_configure(
-            flow["flow_id"], user_input
+            flow["flow_id"], {CONF_USER_TOKEN: "new-remembered-credential"}
         )
         await hass.async_block_till_done()
     assert result["reason"] == "reauth_successful"
     assert entry.data[CONF_TOKEN] == renewed
-    assert entry.data[CONF_USER_TOKEN] == (
-        "rotated-credential" if include_resume else ""
-    )
+    assert entry.data[CONF_USER_TOKEN] == "rotated-credential"
     assert entry.state is ConfigEntryState.LOADED
 
 
-async def test_webhook_new_resume_credential_never_downgrades_a_newer_jwt(
-    hass, hass_client_no_auth, recorder_mock, hass_storage
+async def test_legacy_jwt_only_entry_reauth_asks_for_session_token(
+    hass, recorder_mock, hass_storage
 ):
-    from homeassistant.components import webhook
     from custom_components.mast_water.helpers import Card
 
-    entry = make_entry(mk_token(48))
-    current = entry.data[CONF_TOKEN]
-    client = await webhook_client(hass, hass_client_no_auth)
+    entry = make_entry(mk_token(-1))
+    with patch(STATS):
+        await setup_entry(hass, entry)
+    flow = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]
+    assert flow["context"]["source"] == SOURCE_REAUTH
+    result = await hass.config_entries.flow.async_configure(
+        flow["flow_id"], {CONF_USER_TOKEN: ""}
+    )
+    assert result["errors"] == {"base": "session_token_required"}
+    fields = {key.schema for key in result["data_schema"].schema}
+    assert fields == {CONF_USER_TOKEN}
+
+    renewed = mk_token(48)
     with (
-        patch(f"{API}.async_resume_session", renew_with(mk_token(10))),
-        patch(f"{API}.async_get_cards", AsyncMock(return_value=[Card(CARD, "Test")])),
+        patch(f"{API}.async_resume_session", renew_with(renewed)),
         patch(f"{API}.async_restore_session", AsyncMock(return_value=True)),
+        patch(f"{API}.async_get_cards", AsyncMock(return_value=[Card(CARD, "Test")])),
         patch(f"{API}.async_get_readings", fake_get_readings),
         patch(STATS),
     ):
-        await setup_entry(hass, entry)
-        status, body = await post(
-            client,
-            webhook.async_generate_path(entry.data["webhook_id"]),
-            {"token": mk_token(5), "user_token": "remembered-credential"},
+        result = await hass.config_entries.flow.async_configure(
+            flow["flow_id"], {CONF_USER_TOKEN: "credential"}
         )
         await hass.async_block_till_done()
-    assert status == 200 and body["changed"] is True
-    assert entry.data[CONF_TOKEN] == current
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_TOKEN] == renewed
     assert entry.data[CONF_USER_TOKEN] == "rotated-credential"
+    assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_reauth_reports_invalid_assets_separately(
+    hass, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(-1))
+    with patch(STATS):
+        await setup_entry(hass, entry)
+    flow = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]
+    with (
+        patch(f"{API}.async_resume_session", renew_with(mk_token(48))),
+        patch(f"{API}.async_restore_session", AsyncMock(return_value=False)),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow["flow_id"], {CONF_USER_TOKEN: "credential"}
+        )
+    assert result["errors"] == {"base": "assets_invalid"}
