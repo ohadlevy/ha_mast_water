@@ -201,7 +201,12 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             if not self._token_alive() and not self._client.user_token:
                 raise
             if self._token_alive():
-                restored = await self._client.async_restore_session()
+                try:
+                    restored = await self._client.async_restore_session()
+                except MastAuthError:
+                    # The JWT may be rejected by both endpoints. The resume
+                    # credential can still obtain a fresh one below.
+                    restored = False
                 _LOGGER.info(
                     "MAST refused a token that has not expired (%s); %s the session, trying again",
                     err,

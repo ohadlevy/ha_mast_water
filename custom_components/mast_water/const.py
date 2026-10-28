@@ -15,7 +15,6 @@ CONF_CARD = "card_number"
 CONF_TOKEN = "token"
 CONF_USER_TOKEN = "user_token"
 CONF_COMPANY_ID = "company_id"
-CONF_WEBHOOK_ID = "webhook_id"
 
 # 110 = Mei Raanana (from the X-CompanyId header the MAST web app sends)
 DEFAULT_COMPANY_ID = "110"
