@@ -46,6 +46,8 @@ async def _resume_credentials(
         async_get_clientsession(hass), token, card, company, user_token=user_token
     )
     await client.async_resume_session()
+    if not await client.async_restore_session():
+        raise MastApiError("MAST could not restore the water session")
     if not any(item.number == card for item in await client.async_get_cards()):
         raise MastAuthError("The resumed session cannot access this water card")
     return {CONF_TOKEN: client.token, CONF_USER_TOKEN: client.user_token}
@@ -131,6 +133,8 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 if user_token:
                     try:
                         await client.async_resume_session()
+                        if not await client.async_restore_session():
+                            errors["base"] = "cannot_connect"
                     except MastAuthError:
                         errors["base"] = "invalid_user_token"
                     except (MastConnectionError, MastApiError):

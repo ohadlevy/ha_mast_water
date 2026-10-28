@@ -17,7 +17,7 @@ remembered-login token (`user.token`) that can obtain new JWTs. The JWT lasts **
 Supply `user.token` during setup, or let the userscript capture it. Home Assistant obtains the first JWT from
 it and exchanges it again during the final 12 hours of each JWT's validity. This flow was verified repeatedly
 against MAST without another OTP. The renewal credential's server lifetime is still unknown; if MAST
-rejects it, the integration asks you to sign in again. See [the auth research](docs/AUTH_RESEARCH.md).
+rejects it, the integration asks you to sign in again. See [the API findings](docs/FINDINGS.md#authentication).
 
 If a session cannot be renewed, the next time Home Assistant has a valid token it fetches every day since the
 last import and fills in the history with the correct dates.
@@ -69,7 +69,7 @@ The userscript sends both credentials from your existing browser login. Home Ass
 afterwards without needing the browser to remain open.
 
 1. Install a userscript manager such as Tampermonkey in the browser you use for MAST.
-2. Create a new script from [`userscript/mast-token-push.user.js`](userscript/mast-token-push.user.js).
+2. Create a new script from the optional [`contrib/mast-token-push.user.js`](contrib/mast-token-push.user.js).
 3. Set `HA_WEBHOOK_URL` near the top to the URL from the integration, and replace `YOUR_HA_HOST` in the
    `@connect` line with its host name. Use the **internal** URL if you usually log in from home, the
    **external** one if you want it to work anywhere.
@@ -121,6 +121,8 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 - It also contains a user identifier (probably your ID number) and your phone number in readable form (a JWT is
   only encoded, not encrypted). Redact it before sharing logs, screenshots or HAR files.
 - The session renewal token can obtain new JWTs; treat it as a password. Its server lifetime is unknown.
+- MAST may revoke the session renewal token after logout. It survived one observed logout and new OTP login,
+  but its behavior across other sessions has not been established.
 - Home Assistant stores both credentials in `.storage` in plain text, like other integration credentials.
   Do not share backups.
 - The webhook URL is a secret. Anyone with it can try to push a token, but only a token that works for your card is
@@ -163,11 +165,4 @@ opaque-token rotation, failure handling, and credential binding to a meter. Test
 ```bash
 pip install pytest-homeassistant-custom-component
 pytest
-```
-
-Offline probe and userscript checks:
-
-```bash
-python3 -B -m unittest discover -s scripts/tests -v
-node scripts/tests/test_token_push.js
 ```

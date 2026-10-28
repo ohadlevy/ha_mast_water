@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '../../userscript/mast-token-push.user.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, 'mast-token-push.user.js'), 'utf8');
 const jwt = 'header.' + Buffer.from(JSON.stringify({exp: Math.floor(Date.now() / 1000) + 172800})).toString('base64url') + '.signature';
 
 function browser(initialUserToken, priorPush) {

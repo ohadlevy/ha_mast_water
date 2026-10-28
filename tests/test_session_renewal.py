@@ -191,14 +191,17 @@ async def test_failed_early_renewal_keeps_using_valid_jwt(
 ):
     old = mk_token(6)
     entry = renewable_entry(old)
+    resume = AsyncMock(side_effect=error)
     with (
-        patch(f"{API}.async_resume_session", AsyncMock(side_effect=error)),
+        patch(f"{API}.async_resume_session", resume),
         patch(f"{API}.async_get_readings", fake_get_readings),
         patch(STATS),
     ):
         await setup_entry(hass, entry)
+        await entry.runtime_data.async_refresh()
     assert entry.state is ConfigEntryState.LOADED
     assert entry.data[CONF_TOKEN] == old
+    assert resume.await_count == (1 if isinstance(error, MastAuthError) else 2)
     assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
 
 
@@ -260,9 +263,24 @@ async def test_initial_flow_accepts_resume_credential_without_valid_jwt(
     from custom_components.mast_water.helpers import Card
 
     renewed = mk_token(48)
+    calls = []
+
+    async def resume(self):
+        calls.append("resume")
+        await renew_with(renewed)(self)
+
+    async def restore(self):
+        calls.append("restore")
+        return True
+
+    async def cards(self):
+        calls.append("cards")
+        return [Card(CARD, "Test")]
+
     with (
-        patch(f"{API}.async_resume_session", renew_with(renewed)),
-        patch(f"{API}.async_get_cards", AsyncMock(return_value=[Card(CARD, "Test")])),
+        patch(f"{API}.async_resume_session", resume),
+        patch(f"{API}.async_restore_session", restore),
+        patch(f"{API}.async_get_cards", cards),
         patch(f"{API}.async_get_readings", fake_get_readings),
         patch(STATS),
     ):
@@ -281,6 +299,7 @@ async def test_initial_flow_accepts_resume_credential_without_valid_jwt(
         assert result["data"][CONF_TOKEN] == renewed
         assert result["data"][CONF_USER_TOKEN] == "rotated-credential"
         await hass.async_block_till_done()
+    assert calls[:3] == ["resume", "restore", "cards"]
 
 
 @pytest.mark.parametrize("card_matches", [True, False])
@@ -292,12 +311,24 @@ async def test_reconfigure_validates_resume_credential_for_existing_meter(
     entry = make_entry(mk_token(-1))
     entry.add_to_hass(hass)
     renewed = mk_token(48)
+    calls = []
+
+    async def resume(self):
+        calls.append("resume")
+        await renew_with(renewed)(self)
+
+    async def restore(self):
+        calls.append("restore")
+        return True
+
+    async def cards(self):
+        calls.append("cards")
+        return [Card(CARD if card_matches else "other", "Test")]
+
     with (
-        patch(f"{API}.async_resume_session", renew_with(renewed)),
-        patch(
-            f"{API}.async_get_cards",
-            AsyncMock(return_value=[Card(CARD if card_matches else "other", "Test")]),
-        ),
+        patch(f"{API}.async_resume_session", resume),
+        patch(f"{API}.async_restore_session", restore),
+        patch(f"{API}.async_get_cards", cards),
         patch(f"{API}.async_get_readings", fake_get_readings),
         patch(STATS),
     ):
@@ -316,6 +347,7 @@ async def test_reconfigure_validates_resume_credential_for_existing_meter(
             assert result["errors"] == {"base": "invalid_user_token"}
             assert CONF_USER_TOKEN not in entry.data
         await hass.async_block_till_done()
+    assert calls[:3] == ["resume", "restore", "cards"]
 
 
 @pytest.mark.parametrize("card_result", ["match", "different", "missing"])
@@ -405,6 +437,7 @@ async def test_reauthentication_can_replace_or_clear_rejected_resume_credential(
         user_input[CONF_TOKEN] = mk_token(-1)
     with (
         patch(f"{API}.async_resume_session", renew_with(renewed)),
+        patch(f"{API}.async_restore_session", AsyncMock(return_value=True)),
         patch(f"{API}.async_get_cards", AsyncMock(return_value=[Card(CARD, "Test")])),
         patch(f"{API}.async_get_readings", fake_get_readings),
         patch(STATS),

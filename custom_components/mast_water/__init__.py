@@ -89,13 +89,13 @@ def _make_webhook_handler(entry: ConfigEntry):
         try:
             if new_resume_credential:
                 await client.async_resume_session()
+                if not await client.async_restore_session():
+                    return _reply(502, error="cannot_reach_mast")
                 if not any(
                     card.number == entry.data[CONF_CARD]
                     for card in await client.async_get_cards()
                 ):
                     return _reply(400, error="token_not_valid_for_this_card")
-                if not await client.async_restore_session():
-                    return _reply(502, error="cannot_reach_mast")
                 card_verified = True
             await client.async_get_readings(today - timedelta(days=3), today)
         except MastAuthError:

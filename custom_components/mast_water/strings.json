@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "MAST water meter",
-        "description": "Paste the session renewal token (user.token) from MAST to let Home Assistant obtain and renew JWTs automatically. Alternatively, paste a JWT, which expires after 48 hours. See the README for browser steps.",
+        "description": "Sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result into Session renewal token. Leave JWT token empty; Home Assistant obtains it automatically. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet into the console. You can also provide a JWT instead.",
         "data": {
           "token": "JWT token (optional with session renewal token)",
           "company_id": "Company ID (X-CompanyId)",
@@ -30,7 +30,7 @@
       },
       "reauth_confirm": {
         "title": "MAST session needs sign-in",
-        "description": "MAST could not renew this session. Sign in at mast.co.il, then paste the session renewal token or a fresh JWT. The userscript can also send both credentials.",
+        "description": "MAST could not renew this session. Sign in at [mast.co.il](https://www.mast.co.il). In the site's browser console, run `copy(JSON.parse(localStorage.getItem('user')||'{}').token)` and paste the result into Session renewal token. Chrome and Firefox may ask you to type `allow pasting` before pasting the snippet. You can also paste a fresh JWT or use the optional userscript.",
         "data": {
           "token": "JWT token (optional with session renewal token)",
           "user_token": "Session renewal token (user.token)"

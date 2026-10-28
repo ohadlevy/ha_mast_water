@@ -11,11 +11,11 @@ Personal values (card number, address, phone, ID, tokens) are deliberately left 
 - It returns **one cumulative meter reading per day** (m³), so history and daily usage can be read directly.
 - Authentication is a **JWT valid for 48 hours**, obtained by an **SMS-code login in which both steps carry a
   Google reCAPTCHA v3 token**. The initial credentials come from the user's browser. The integration can then
-  renew the JWT using the separate remembered-login `user.token`; see [auth research](AUTH_RESEARCH.md).
+  obtain or renew the JWT using the separate remembered-login `user.token` (see "Authentication").
 - A few hours after login MAST drops the **server-side state behind the `WaterMeter` endpoints**. They then
   answer 401 `Expired|NotValid` although the token is still valid. Two calls restore it (see "Session restore").
 - No dedicated refresh-token endpoint has been found. The app startup code calls `Users/GetUserByToken`
-  using `user.token` returned by login. Two real exchanges without a JWT, OTP, or reCAPTCHA returned a new JWT
+  using `user.token` returned by login. Repeated exchanges without a JWT, OTP, or reCAPTCHA returned a new JWT
   in `new-token` with a later expiry and working account access. The integration renews before expiry and
   persists both credentials. The opaque credential's lifetime and post-expiry behavior remain unverified.
 
@@ -61,11 +61,25 @@ client timer), and does not accept a resident token.
 
 ## Authentication
 
-- **Token:** a standard JWT (HS256) with a user identifier, a mobile phone number, `nbf`, `iat`, `exp`, `iss` and
+- **JWT:** a standard JWT (HS256) with a user identifier, a mobile phone number, `nbf`, `iat`, `exp`, `iss` and
   `aud`. The claims are only base64-encoded, so anyone who sees the token can read them.
 - **Lifetime:** `exp - iat` is exactly 48 hours.
 - **Logout does not revoke it:** after logging out in the browser the same token still returned data, so the
   server checks signature and expiry (and the session state below), not a revocation list.
+
+The website uses three values that serve different roles:
+
+| Value | Origin and use |
+|---|---|
+| `jwtToken` | API JWT, sent as `jwt: Bearer …`; the HTTP interceptor replaces it when a response has `new-token`. |
+| `user.token` / `userToken` | Returned in the successful login's user object and sent to `Users/GetUserByToken`. In normal web mode, read it from `JSON.parse(localStorage.getItem('user')).token`. Its server lifetime is unknown. |
+| `token.val` / `loginDto.token` | Client-generated UUID used during OTP verification. The separate localStorage `token` wrapper has a two-day client expiry. It may equal `user.token`, but that relationship is unverified; use the server-returned `user.token`. |
+
+The app startup code checks its stored `userToken`, calls `Users/GetUserByToken`, then stores the returned user
+and navigates to the active company's services. This path has no OTP or reCAPTCHA request. In the captured web
+build (`isApp: false`), the separate `userToken` storage entry is usually absent, but the `user` object still
+contains its `token` field. After `user.expirationDate`, the web client's getter clears its local storage.
+
 - **Responses:** an expired token gives HTTP 401 with a JSON body `{"reason": "expired"}`, which the web app turns
   into "log in again". A 401 with `Expired|NotValid` is the lapsed session state below, not an expired token.
   Cloudflare sits in front of the API (`server: cloudflare`); a 403 with an HTML body is a block by it, not a MAST
@@ -74,6 +88,8 @@ client timer), and does not accept a resident token.
   lacked this header, but `Users/GetUserByToken` was verified to return it. A query credential from
   `user.token` is sufficient; no existing JWT, cookies, OTP or reCAPTCHA were supplied in the successful
   exchanges. The returned identity claims matched the original JWT and the expiry increased on each exchange.
+  The previously captured `user.token` still worked after one observed logout and new OTP login, and the
+  returned opaque value was unchanged. MAST may still revoke it in other circumstances.
 - **Integration behavior:** renew during the final 12 hours of JWT validity, or after an auth failure that
   session restoration did not fix. Persist the JWT and opaque-token rotation together. Temporary renewal
   outages keep a valid JWT in use or retry if it has expired. A rejected renewal credential eventually
@@ -118,14 +134,14 @@ An Angular single-page app. Every API call goes through one service that prefixe
 `jwt: Bearer <token>` (from localStorage) and `X-CompanyId`, and handles responses as described above. The water
 page calls `GetWaterMeterCards` on load (and preselects the card if there is only one), then
 `GetWaterMeterCardReading`. No dedicated refresh-token call was found. A follow-up search of all chunks listed
-by the captured runtime manifest found a session-resume call in the lazy-loaded app startup bundle that the
-initial page capture did not include. See [the source identities and runtime checks](AUTH_RESEARCH.md).
+by the captured runtime manifest found the session-resume call in the lazy-loaded app startup bundle that the
+initial page capture did not include.
 
 ## Open questions
 
 - How long does the remembered-login `user.token` remain usable? Does successful renewal extend its own
   server lifetime? Does it continue working after the original JWT expires?
-- The opaque token did not rotate in the two observed exchanges. Under what conditions does it rotate?
+- The opaque token did not rotate in the observed exchanges. Under what conditions does it rotate?
 - How long does the restored session state last, and what exactly drops it?
 - Is a reading the meter value at the start or end of its date?
 - Would Mei Raanana or MAST offer an API key or a longer-lived token for home automation? Asking them is the

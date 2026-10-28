@@ -97,6 +97,7 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{card}")
         self._chunk_days = CHUNK_DAYS
         self._renewals = 0
+        self._rejected_resume_credential: str | None = None
         self.auth_failures = 0  # consecutive rejections of a not-yet-expired token
         self.last_auth_error: str | None = None
 
@@ -148,14 +149,29 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         if changed:
             _LOGGER.info("MAST renewed the session token (expires %s)", self._expiry)
 
+    async def _resume_session(self) -> None:
+        """Remember rejected credentials so a valid JWT can keep working quietly."""
+        try:
+            await self._client.async_resume_session()
+        except MastAuthError:
+            self._rejected_resume_credential = self._client.user_token
+            raise
+        else:
+            self._rejected_resume_credential = None
+
     async def _renew_if_needed(self) -> None:
         """Renew near expiry; temporary outages must not force another OTP login."""
         now = dt_util.utcnow()
-        if self._client.user_token and (
-            self._expiry is None or self._expiry <= now + TOKEN_RENEWAL_WINDOW
+        if (
+            self._client.user_token
+            and (self._expiry is None or self._expiry <= now + TOKEN_RENEWAL_WINDOW)
+            and not (
+                self._token_alive()
+                and self._client.user_token == self._rejected_resume_credential
+            )
         ):
             try:
-                await self._client.async_resume_session()
+                await self._resume_session()
             except MastAuthError as err:
                 if not self._token_alive():
                     raise ConfigEntryAuthFailed(
@@ -199,8 +215,13 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             # A server-side rejection can precede the JWT's advertised expiry,
             # or expiry can occur while fetching a long backfill. Try the real
             # remembered-login flow once before asking for another browser login.
+            if (
+                self._token_alive()
+                and self._client.user_token == self._rejected_resume_credential
+            ):
+                raise MastAuthError("MAST session-resume credential was rejected")
             try:
-                await self._client.async_resume_session()
+                await self._resume_session()
             finally:
                 self._persist_renewed_token()
             await self._client.async_restore_session()
