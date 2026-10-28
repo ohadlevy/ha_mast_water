@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MAST token -> Home Assistant
 // @namespace    ha-mast-water
-// @version      0.2.0
-// @description  After you log in to mast.co.il yourself, sends the session token to your Home Assistant webhook. It does not log in, solve captchas or read SMS.
+// @version      0.3.0
+// @description  Sends your MAST JWT and remembered-login credential to Home Assistant for automatic session renewal after your initial browser login.
 // @match        https://www.mast.co.il/*
 // @run-at       document-start
 // @grant        unsafeWindow
@@ -59,26 +59,48 @@
 
   let inFlight = false;
 
+  function userToken() {
+    try {
+      const user = JSON.parse(w.localStorage.getItem('user') || 'null');
+      const token = (user && user.token) || JSON.parse(w.localStorage.getItem('userToken') || 'null');
+      return typeof token === 'string' ? token.trim() : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function pushStoredSession() {
+    try {
+      push(JSON.parse(w.localStorage.getItem('jwtToken') || 'null'));
+    } catch (e) {
+      /* storage is optional */
+    }
+  }
+
   function push(rawHeaderValue) {
     const token = String(rawHeaderValue || '').replace(/^Bearer\s+/i, '').trim();
     if (!looksLikeJwt(token)) return;
     const exp = expiryMs(token);
     if (!(exp > Date.now())) return; // expired or unreadable
-    if (inFlight || GM_getValue('lastPushedToken', '') === token) return; // already sent
+    const resumeToken = userToken();
+    if (inFlight || (GM_getValue('lastPushedToken', '') === token &&
+        GM_getValue('lastPushedUserToken', '') === resumeToken)) return;
     inFlight = true;
     GM_xmlhttpRequest({
       method: 'POST',
       url: HA_WEBHOOK_URL,
       headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ token: token }),
+      data: JSON.stringify({ token: token, ...(resumeToken ? { user_token: resumeToken } : {}) }),
       timeout: 15000,
       onload: function (r) {
         inFlight = false;
         if (r.status === 200) {
           GM_setValue('lastPushedToken', token);
-          toast('MAST token sent to Home Assistant');
+          GM_setValue('lastPushedUserToken', resumeToken);
+          toast('MAST session sent to Home Assistant');
+          setTimeout(pushStoredSession, 0);
         } else {
-          console.warn('[mast-token-push] Home Assistant answered', r.status, r.responseText);
+          console.warn('[mast-token-push] Home Assistant answered', r.status);
         }
       },
       onerror: function () {
@@ -98,6 +120,26 @@
       return false;
     }
   }
+
+  // Capture both credentials once the login response has populated storage.
+  // Outgoing JWT headers can be seen before the user object is written.
+  let storageTimer;
+  if (w.Storage && w.Storage.prototype) {
+    const setItem = w.Storage.prototype.setItem;
+    w.Storage.prototype.setItem = function (key, value) {
+      const result = setItem.apply(this, arguments);
+      try {
+        if (this === w.localStorage && ['user', 'userToken', 'jwtToken'].includes(String(key))) {
+          clearTimeout(storageTimer);
+          storageTimer = setTimeout(pushStoredSession, 0);
+        }
+      } catch (e) {
+        /* never break the page */
+      }
+      return result;
+    };
+  }
+  setTimeout(pushStoredSession, 0);
 
   // The MAST web app talks to the API with XHR (axios) and sends the token in a
   // `jwt` request header, so watch for that header being set.
