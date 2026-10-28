@@ -22,9 +22,11 @@ from .const import (
     BACKFILL_DAYS,
     CHUNK_DAYS,
     CONF_TOKEN,
-    SMALL_CHUNK_DAYS,
+    CONF_USER_TOKEN,
     DOMAIN,
+    SMALL_CHUNK_DAYS,
     STORE_VERSION,
+    TOKEN_RENEWAL_WINDOW,
     UPDATE_INTERVAL,
 )
 from .helpers import Reading, build_rows, token_expiry, token_issued
@@ -110,10 +112,17 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         """
         self.auth_failures += 1
         self.last_auth_error = f"{dt_util.now():%Y-%m-%d %H:%M} {err}"
-        if self._token_alive() and self.data is not None and self.auth_failures < AUTH_STRIKES:
+        if (
+            self._token_alive()
+            and self.data is not None
+            and self.auth_failures < AUTH_STRIKES
+        ):
             _LOGGER.warning(
                 "MAST refused a token that has not expired (%s), retrying in %d minutes (%d/%d)",
-                err, AUTH_RETRY_SECONDS // 60, self.auth_failures, AUTH_STRIKES,
+                err,
+                AUTH_RETRY_SECONDS // 60,
+                self.auth_failures,
+                AUTH_STRIKES,
             )
             return UpdateFailed(
                 f"MAST refused a token that has not expired ({err})",
@@ -122,31 +131,79 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         return ConfigEntryAuthFailed(f"MAST rejected the token ({err})")
 
     def _persist_renewed_token(self) -> None:
-        """Store a token MAST renewed via the `new-token` response header."""
+        """Persist the JWT and any rotated remembered-login credential together."""
         entry = self.config_entry
         current = self._client.token
-        if current == entry.data.get(CONF_TOKEN):
+        user_token = self._client.user_token
+        changed = current != entry.data.get(CONF_TOKEN)
+        if not changed and user_token == entry.data.get(CONF_USER_TOKEN, ""):
             return
         self._expiry = token_expiry(current)
-        self._renewals += 1
-        self.hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_TOKEN: current}
-        )
-        _LOGGER.info("MAST renewed the session token (expires %s)", self._expiry)
+        if changed:
+            self._renewals += 1
+        data = {**entry.data, CONF_TOKEN: current}
+        if user_token:
+            data[CONF_USER_TOKEN] = user_token
+        self.hass.config_entries.async_update_entry(entry, data=data)
+        if changed:
+            _LOGGER.info("MAST renewed the session token (expires %s)", self._expiry)
+
+    async def _renew_if_needed(self) -> None:
+        """Renew near expiry; temporary outages must not force another OTP login."""
+        now = dt_util.utcnow()
+        if self._client.user_token and (
+            self._expiry is None or self._expiry <= now + TOKEN_RENEWAL_WINDOW
+        ):
+            try:
+                await self._client.async_resume_session()
+            except MastAuthError as err:
+                if not self._token_alive():
+                    raise ConfigEntryAuthFailed(
+                        "MAST session-resume credential rejected"
+                    ) from err
+                _LOGGER.warning(
+                    "MAST session resume rejected; the current JWT is still valid"
+                )
+            except (MastConnectionError, MastApiError) as err:
+                if not self._token_alive():
+                    raise UpdateFailed(
+                        "MAST session renewal is temporarily unavailable"
+                    ) from err
+                _LOGGER.warning(
+                    "MAST session renewal unavailable; retrying at the next poll"
+                )
+            finally:
+                self._persist_renewed_token()
+        if self._expiry is not None and self._expiry <= now:
+            raise ConfigEntryAuthFailed("MAST token has expired")
 
     async def _get_readings(self, start: date, end: date) -> list[Reading]:
-        """Fetch one range. If MAST refuses a token that has not expired, restore the session once."""
+        """Fetch a range, repairing the backend session or renewing a rejected JWT."""
         try:
             return await self._client.async_get_readings(start, end)
         except MastAuthError as err:
-            if not self._token_alive():
+            if not self._token_alive() and not self._client.user_token:
                 raise
-            restored = await self._client.async_restore_session()
-            _LOGGER.info(
-                "MAST refused a token that has not expired (%s); %s the session, trying again",
-                err,
-                "restored" if restored else "could not restore",
-            )
+            if self._token_alive():
+                restored = await self._client.async_restore_session()
+                _LOGGER.info(
+                    "MAST refused a token that has not expired (%s); %s the session, trying again",
+                    err,
+                    "restored" if restored else "could not restore",
+                )
+                try:
+                    return await self._client.async_get_readings(start, end)
+                except MastAuthError:
+                    if not self._client.user_token:
+                        raise
+            # A server-side rejection can precede the JWT's advertised expiry,
+            # or expiry can occur while fetching a long backfill. Try the real
+            # remembered-login flow once before asking for another browser login.
+            try:
+                await self._client.async_resume_session()
+            finally:
+                self._persist_renewed_token()
+            await self._client.async_restore_session()
             return await self._client.async_get_readings(start, end)
 
     async def _fetch(self, start: date, end: date) -> list[Reading]:
@@ -165,14 +222,22 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
                 raise UpdateFailed(f"Cannot reach MAST: {err}") from err
             except MastApiError as err:
                 if err.status == 404:
-                    last_error = None  # the web app treats 404 as "no data in this range"
+                    last_error = (
+                        None  # the web app treats 404 as "no data in this range"
+                    )
                 elif err.status == 400 and self._chunk_days > SMALL_CHUNK_DAYS:
                     # This water corporation limits requests to a shorter range.
-                    _LOGGER.info("MAST rejected a %d-day range, using %d days", self._chunk_days, SMALL_CHUNK_DAYS)
+                    _LOGGER.info(
+                        "MAST rejected a %d-day range, using %d days",
+                        self._chunk_days,
+                        SMALL_CHUNK_DAYS,
+                    )
                     self._chunk_days = SMALL_CHUNK_DAYS
                     continue  # retry the same range in smaller pieces
                 else:
-                    _LOGGER.warning("MAST range %s..%s failed: %s", cursor, chunk_end, err)
+                    _LOGGER.warning(
+                        "MAST range %s..%s failed: %s", cursor, chunk_end, err
+                    )
                     last_error = err
             cursor = chunk_end + timedelta(days=1)
         if last_error is not None:
@@ -181,14 +246,10 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         return readings
 
     async def _async_update_data(self) -> MastData:
-        now = dt_util.utcnow()
-        if self._expiry is not None and self._expiry <= now:
-            raise ConfigEntryAuthFailed("MAST token has expired")
+        await self._renew_if_needed()
 
         stored = await self._store.async_load() or {}
-        anchor_day = (
-            date.fromisoformat(stored["day"]) if stored.get("day") else None
-        )
+        anchor_day = date.fromisoformat(stored["day"]) if stored.get("day") else None
         today = dt_util.now().date()
         start = anchor_day if anchor_day else today - timedelta(days=BACKFILL_DAYS)
 
@@ -222,7 +283,9 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
 
         self.auth_failures = 0
         self.last_auth_error = None
-        _LOGGER.debug("MAST poll ok: %d readings, latest %s", len(readings), readings[-1].day)
+        _LOGGER.debug(
+            "MAST poll ok: %d readings, latest %s", len(readings), readings[-1].day
+        )
         latest = readings[-1]
         usage = (
             round(latest.value - readings[-2].value, 3) if len(readings) > 1 else None

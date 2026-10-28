@@ -20,6 +20,7 @@ from .const import (
     CONF_CARD,
     CONF_COMPANY_ID,
     CONF_TOKEN,
+    CONF_USER_TOKEN,
     CONF_WEBHOOK_ID,
     DEFAULT_COMPANY_ID,
     DOMAIN,
@@ -47,6 +48,10 @@ def _make_webhook_handler(entry: ConfigEntry):
         try:
             body = await request.json()
             token = clean_token(str(body["token"]))
+            user_token = body.get(CONF_USER_TOKEN, "")
+            if not isinstance(user_token, str):
+                return _reply(400, error="bad_request")
+            user_token = user_token.strip()
         except (ValueError, KeyError, TypeError, AttributeError):
             return _reply(400, error="bad_request")
 
@@ -56,11 +61,18 @@ def _make_webhook_handler(entry: ConfigEntry):
 
         current = entry.data[CONF_TOKEN]
         current_expiry = token_expiry(current)
-        if token == current or (
-            current_expiry is not None
-            and current_expiry > dt_util.utcnow()
-            and current_expiry >= new_expiry
-        ):
+        newer_jwt = not (
+            token == current
+            or (
+                current_expiry is not None
+                and current_expiry > dt_util.utcnow()
+                and current_expiry >= new_expiry
+            )
+        )
+        new_resume_credential = bool(user_token) and user_token != entry.data.get(
+            CONF_USER_TOKEN
+        )
+        if not newer_jwt and not new_resume_credential:
             return _reply(200, changed=False)  # nothing newer to store
 
         # Make sure the token works for *this* card before storing it, so a
@@ -70,23 +82,45 @@ def _make_webhook_handler(entry: ConfigEntry):
             token,
             entry.data[CONF_CARD],
             entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+            user_token=user_token,
         )
         today = dt_util.now().date()
+        card_verified = not new_resume_credential
         try:
+            if new_resume_credential:
+                await client.async_resume_session()
+                if not any(
+                    card.number == entry.data[CONF_CARD]
+                    for card in await client.async_get_cards()
+                ):
+                    return _reply(400, error="token_not_valid_for_this_card")
+                if not await client.async_restore_session():
+                    return _reply(502, error="cannot_reach_mast")
+                card_verified = True
             await client.async_get_readings(today - timedelta(days=3), today)
         except MastAuthError:
             return _reply(401, error="token_rejected")
         except MastConnectionError:
             return _reply(502, error="cannot_reach_mast")
         except MastApiError as err:
-            if err.status != 404:  # 404 only means "no readings in the last days"
+            if err.status != 404 or not card_verified:
+                # Only the readings endpoint may use 404 to mean "no data".
                 return _reply(400, error="token_not_valid_for_this_card")
         except MastError:
             return _reply(400, error="token_not_valid_for_this_card")
 
-        hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_TOKEN: token}
-        )
+        token = client.token
+        new_expiry = token_expiry(token)
+        # A same-JWT push can add the resume credential; an older browser JWT
+        # must never replace the more recent one held by Home Assistant.
+        if current_expiry is not None and (
+            new_expiry is None or current_expiry > new_expiry
+        ):
+            token, new_expiry = current, current_expiry
+        data = {**entry.data, CONF_TOKEN: token}
+        if new_resume_credential:
+            data[CONF_USER_TOKEN] = client.user_token
+        hass.config_entries.async_update_entry(entry, data=data)
         for flow in hass.config_entries.flow.async_progress_by_handler(
             DOMAIN,
             match_context={"entry_id": entry.entry_id, "source": SOURCE_REAUTH},
@@ -135,6 +169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MastConfigEntry) -> bool
         token,
         card,
         entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+        user_token=entry.data.get(CONF_USER_TOKEN, ""),
     )
     coordinator = MastCoordinator(hass, entry, client, card, token)
     # Raises ConfigEntryAuthFailed (starts reauth) or ConfigEntryNotReady.

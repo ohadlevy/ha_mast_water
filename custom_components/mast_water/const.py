@@ -8,10 +8,12 @@ API_BASE = "https://api.mast.co.il/mast/api/"
 API_URL = API_BASE + "WaterMeter/GetWaterMeterCardReading"
 CARDS_URL = API_BASE + "WaterMeter/GetWaterMeterCards"
 VALIDATE_URL = API_BASE + "PersonalAreaAsset/ValidateUserAssets"
+RESUME_URL = API_BASE + "Users/GetUserByToken"
 ORIGIN = "https://www.mast.co.il"
 
 CONF_CARD = "card_number"
 CONF_TOKEN = "token"
+CONF_USER_TOKEN = "user_token"
 CONF_COMPANY_ID = "company_id"
 CONF_WEBHOOK_ID = "webhook_id"
 
@@ -20,6 +22,8 @@ DEFAULT_COMPANY_ID = "110"
 
 # New data appears about once a day.
 UPDATE_INTERVAL = timedelta(hours=3)
+# Renew while the JWT is still usable, with several polls available for retries.
+TOKEN_RENEWAL_WINDOW = timedelta(hours=12)
 
 # How far back the very first run asks for data. The web app's date picker allows
 # about two years. Empty or failing old chunks are skipped.

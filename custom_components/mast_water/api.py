@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 import aiohttp
 
-from .const import API_URL, CARDS_URL, ORIGIN, VALIDATE_URL
-from .helpers import Card, Reading, clean_token, parse_cards, parse_readings, token_expiry
+from .const import API_URL, CARDS_URL, ORIGIN, RESUME_URL, VALIDATE_URL
+from .helpers import (
+    Card,
+    Reading,
+    clean_token,
+    parse_cards,
+    parse_readings,
+    token_expiry,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +71,9 @@ class MastClient:
         url: str = API_URL,
         cards_url: str = CARDS_URL,
         validate_url: str = VALIDATE_URL,
+        *,
+        user_token: str = "",
+        resume_url: str = RESUME_URL,
     ) -> None:
         self._session = session
         self._token = token
@@ -72,11 +82,18 @@ class MastClient:
         self._url = url
         self._cards_url = cards_url
         self._validate_url = validate_url
+        self._user_token = user_token
+        self._resume_url = resume_url
 
     @property
     def token(self) -> str:
         """The token currently in use (may be newer than the one passed in)."""
         return self._token
+
+    @property
+    def user_token(self) -> str:
+        """The opaque session-resume credential, including any server rotation."""
+        return self._user_token
 
     def _adopt_new_token(self, header_value: str | None) -> None:
         """Take over a renewed token the server sends in the `new-token` header.
@@ -107,39 +124,83 @@ class MastClient:
             "User-Agent": "Mozilla/5.0 (compatible; HomeAssistant mast_water)",
         }
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+    async def _request(
+        self, method: str, url: str, *, resume: bool = False, **kwargs: Any
+    ) -> Any:
         """Send a request and return the decoded JSON body."""
+        headers = self._headers()
+        if resume:
+            # The app's remembered-login credential works independently of the
+            # old JWT. In particular, never attach an expired JWT to this call.
+            headers.pop("jwt")
         try:
             async with self._session.request(
                 method,
                 url,
-                headers=self._headers(),
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30),
+                allow_redirects=False,
                 **kwargs,
             ) as resp:
                 status = resp.status
                 text = await resp.text()
                 if status in (401, 403):
+                    if resume:
+                        # Error bodies and exception URLs may echo the query
+                        # credential. Do not put them in logs or exceptions.
+                        if status == 403 and error_reason(text) is None:
+                            raise MastApiError(
+                                "HTTP 403 (session resume blocked)", status
+                            )
+                        raise MastAuthError("MAST session resume rejected")
                     reason = error_reason(text)
                     if status == 403 and reason is None:
                         # A 403 without MAST's JSON error body (for example an HTML
                         # page from the CDN in front of the API) is a block, not an
                         # expired token, so do not ask the user to log in again.
-                        raise MastApiError("HTTP 403 (blocked, not a MAST error)", status)
+                        raise MastApiError(
+                            "HTTP 403 (blocked, not a MAST error)", status
+                        )
                     detail = f", reason: {reason}" if reason else ""
                     raise MastAuthError(f"HTTP {status}{detail}")
-                if status >= 400:
+                if status >= 300:
                     # The API answers bad card numbers / bad ranges with a
                     # generic 500 and a Hebrew message, so keep the status.
-                    _LOGGER.debug("MAST API HTTP %s: %s", status, text[:200])
+                    if not resume:
+                        _LOGGER.debug("MAST API HTTP %s: %s", status, text[:200])
                     raise MastApiError(f"HTTP {status}", status)
-                self._adopt_new_token(resp.headers.get("new-token"))
                 try:
-                    return await resp.json(content_type=None)
-                except (aiohttp.ContentTypeError, ValueError) as err:
-                    raise MastApiError("response was not JSON") from err
+                    payload = await resp.json(content_type=None)
+                except (aiohttp.ContentTypeError, ValueError):
+                    raise MastApiError("response was not JSON") from None
+                candidate = resp.headers.get("new-token")
+                if resume:
+                    if (
+                        not isinstance(payload, dict)
+                        or payload.get("isSuccess") is not True
+                    ):
+                        raise MastAuthError("MAST session resume rejected")
+                    expiry = token_expiry(clean_token(candidate or ""))
+                    if expiry is None or expiry <= datetime.now(timezone.utc):
+                        raise MastApiError("Session resume returned no valid JWT")
+                    user = payload.get("user")
+                    returned = user.get("token") if isinstance(user, dict) else None
+                    if isinstance(returned, str) and returned.strip():
+                        self._user_token = returned.strip()
+                self._adopt_new_token(candidate)
+                return payload
         except (aiohttp.ClientError, TimeoutError) as err:
+            if resume:
+                raise MastConnectionError("Cannot reach MAST session resume") from None
             raise MastConnectionError(str(err)) from err
+
+    async def async_resume_session(self) -> None:
+        """Exchange the remembered-login token for a JWT without a new OTP."""
+        if not self._user_token:
+            raise MastAuthError("No MAST session-resume credential configured")
+        await self._request(
+            "GET", self._resume_url, resume=True, params={"token": self._user_token}
+        )
 
     async def async_restore_session(self) -> bool:
         """Do what the web app does before it opens the water page.

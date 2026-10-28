@@ -280,6 +280,7 @@ async def test_webhook_ignores_same_or_older_token(
         ({"nope": 1}, 400, "bad_request"),
         ({"token": "garbage"}, 400, "invalid_or_expired_token"),
         ({"token": mk_token(-1)}, 400, "invalid_or_expired_token"),
+        ({"token": mk_token(48), "user_token": {"bad": "type"}}, 400, "bad_request"),
     ],
 )
 async def test_webhook_rejects_bad_input(

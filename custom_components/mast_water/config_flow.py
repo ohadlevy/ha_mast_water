@@ -17,6 +17,9 @@ from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 from homeassistant.util import dt as dt_util
 
@@ -25,11 +28,27 @@ from .const import (
     CONF_CARD,
     CONF_COMPANY_ID,
     CONF_TOKEN,
+    CONF_USER_TOKEN,
     CONF_WEBHOOK_ID,
     DEFAULT_COMPANY_ID,
     DOMAIN,
 )
 from .helpers import Card, clean_token, token_expiry
+
+USER_TOKEN_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+
+async def _resume_credentials(
+    hass: HomeAssistant, card: str, token: str, company: str, user_token: str
+) -> dict[str, str]:
+    """Validate a resume credential against the existing meter before saving it."""
+    client = MastClient(
+        async_get_clientsession(hass), token, card, company, user_token=user_token
+    )
+    await client.async_resume_session()
+    if not any(item.number == card for item in await client.async_get_cards()):
+        raise MastAuthError("The resumed session cannot access this water card")
+    return {CONF_TOKEN: client.token, CONF_USER_TOKEN: client.user_token}
 
 
 def webhook_urls(hass: HomeAssistant, webhook_id: str) -> tuple[str, str]:
@@ -79,6 +98,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._token = ""
+        self._user_token = ""
         self._company = DEFAULT_COMPANY_ID
         self._cards: list[Card] = []
         self._card = ""
@@ -91,16 +111,30 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             token = clean_token(user_input[CONF_TOKEN])
             company = user_input[CONF_COMPANY_ID].strip()
+            user_token = user_input.get(CONF_USER_TOKEN, "").strip()
             expiry = token_expiry(token)
             if expiry is None:
                 errors["base"] = "invalid_token"
-            elif expiry <= dt_util.utcnow():
+            elif expiry <= dt_util.utcnow() and not user_token:
                 errors["base"] = "token_expired"
             else:
                 client = MastClient(
-                    async_get_clientsession(self.hass), token, "", company
+                    async_get_clientsession(self.hass),
+                    token,
+                    "",
+                    company,
+                    user_token=user_token,
                 )
                 cards: list[Card] = []
+                if user_token:
+                    try:
+                        await client.async_resume_session()
+                    except MastAuthError:
+                        errors["base"] = "invalid_user_token"
+                    except (MastConnectionError, MastApiError):
+                        errors["base"] = "cannot_connect"
+                if errors:
+                    return self._show_user_form(errors)
                 try:
                     cards = await client.async_get_cards()
                 except MastAuthError:
@@ -110,13 +144,19 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 except MastApiError:
                     cards = []  # fall back to typing the card number by hand
                 if not errors:
-                    self._token, self._company, self._cards = token, company, cards
+                    self._token = client.token
+                    self._user_token = client.user_token
+                    self._company, self._cards = company, cards
                     return await self.async_step_card()
+        return self._show_user_form(errors)
+
+    def _show_user_form(self, errors: dict[str, str]) -> ConfigFlowResult:
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_TOKEN): str,
+                    vol.Optional(CONF_USER_TOKEN): USER_TOKEN_SELECTOR,
                     vol.Required(CONF_COMPANY_ID, default=DEFAULT_COMPANY_ID): str,
                 }
             ),
@@ -143,7 +183,9 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._cards:
             schema = vol.Schema(
                 {
-                    vol.Required(CONF_CARD, default=self._cards[0].number): SelectSelector(
+                    vol.Required(
+                        CONF_CARD, default=self._cards[0].number
+                    ): SelectSelector(
                         SelectSelectorConfig(
                             options=[
                                 SelectOptionDict(
@@ -171,6 +213,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_TOKEN: self._token,
                     CONF_COMPANY_ID: self._company,
                     CONF_WEBHOOK_ID: self._webhook_id,
+                    **({CONF_USER_TOKEN: self._user_token} if self._user_token else {}),
                 },
             )
         internal, external = webhook_urls(self.hass, self._webhook_id)
@@ -186,14 +229,34 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show the webhook URLs again (for setting up the userscript later)."""
+        """Show webhook URLs and optionally enable remembered-session renewal."""
         entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_abort(reason="reconfigure_successful")
+            user_token = user_input.get(CONF_USER_TOKEN, "").strip()
+            if not user_token:
+                return self.async_abort(reason="reconfigure_successful")
+            try:
+                updates = await _resume_credentials(
+                    self.hass,
+                    entry.data[CONF_CARD],
+                    entry.data[CONF_TOKEN],
+                    entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+                    user_token,
+                )
+            except MastAuthError:
+                errors["base"] = "invalid_user_token"
+            except (MastConnectionError, MastApiError):
+                errors["base"] = "cannot_connect"
+            else:
+                return self.async_update_reload_and_abort(entry, data_updates=updates)
         internal, external = webhook_urls(self.hass, entry.data[CONF_WEBHOOK_ID])
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema({}),
+            data_schema=vol.Schema(
+                {vol.Optional(CONF_USER_TOKEN): USER_TOKEN_SELECTOR}
+            ),
+            errors=errors,
             description_placeholders={
                 "internal_url": internal,
                 "external_url": external,
@@ -212,19 +275,39 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         if user_input is not None:
             token = clean_token(user_input[CONF_TOKEN])
-            if error := await _validate(
-                self.hass,
-                entry.data[CONF_CARD],
-                token,
-                entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+            user_token = user_input.get(CONF_USER_TOKEN, "").strip()
+            updates = {CONF_TOKEN: token, CONF_USER_TOKEN: ""}
+            if user_token:
+                try:
+                    updates = await _resume_credentials(
+                        self.hass,
+                        entry.data[CONF_CARD],
+                        token,
+                        entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+                        user_token,
+                    )
+                except MastAuthError:
+                    errors["base"] = "invalid_user_token"
+                except (MastConnectionError, MastApiError):
+                    errors["base"] = "cannot_connect"
+            if not errors and (
+                error := await _validate(
+                    self.hass,
+                    entry.data[CONF_CARD],
+                    updates[CONF_TOKEN],
+                    entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+                )
             ):
                 errors["base"] = error
-            else:
-                return self.async_update_reload_and_abort(
-                    entry, data_updates={CONF_TOKEN: token}
-                )
+            if not errors:
+                return self.async_update_reload_and_abort(entry, data_updates=updates)
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required(CONF_TOKEN): str}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TOKEN): str,
+                    vol.Optional(CONF_USER_TOKEN): USER_TOKEN_SELECTOR,
+                }
+            ),
             errors=errors,
         )
