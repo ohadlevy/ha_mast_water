@@ -27,10 +27,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-test.txt
 
-      - name: Run Ruff Lint & Format Check
+      - name: Run Pre-commit Hooks (Lint & Format)
         run: |
-          ruff check .
-          ruff format --check .
+          pre-commit run --all-files
 
       - name: Validate with Hassfest
         uses: home-assistant/actions/hassfest@master
