@@ -216,7 +216,7 @@ class MastClient:
         return not (isinstance(validation, dict) and validation.get("isValid") is False)
 
     async def async_get_readings(self, date_from: date, date_to: date) -> list[Reading]:
-        """Fetch cumulative daily readings for an inclusive date range."""
+        """Fetch cumulative daily readings for [date_from, date_to)."""
         payload = await self._request(
             "POST",
             self._url,

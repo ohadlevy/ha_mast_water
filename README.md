@@ -58,6 +58,10 @@ the Energy dashboard.
 
 The first run imports up to two years of history in 30-day requests (the most the MAST web app allows at once;
 it falls back to 7 days for water corporations that only allow that). Ranges with no data are skipped.
+After upgrading to the date-range fix, the first poll rereads history from the earliest saved statistic to
+fill days that older versions skipped at request boundaries. It keeps the existing running total and checks
+that Home Assistant saved the repaired rows. If a range or the import fails, it retries on a later day while
+normal polling continues.
 
 ### Enable renewal on an existing installation
 
@@ -102,6 +106,7 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 | Re-authentication prompt every 2 days | Only a JWT is configured, or MAST rejected the session token. Add it through Reconfigure. |
 | "MAST says the account assets are not valid" | MAST explicitly rejected the account's water assets during session restore; check the account and water access on the website. |
 | Data stops, no prompt | MAST or session renewal may be temporarily unavailable. Network errors are retried without immediately requesting OTP. |
+| A day is missing from older Energy history | Upgrade to the date-range fix and let the integration poll. It rereads and repairs the available history once. |
 | Log: `MAST refused a token that has not expired (...); restored the session, trying again` | Normal. MAST had dropped its session state and the integration repaired it. |
 | Log: `... retrying in 30 minutes (n/3)` | MAST still refused after the repair. After three tries in a row you are asked to log in again. |
 
@@ -123,8 +128,7 @@ Remove the integration, delete the `mast_water:meter_<card>` statistic (Develope
 `custom_components/mast_water/helpers.py` has no Home Assistant imports, so the parsing and statistics logic can
 be unit tested on its own. `tests/` runs the config flow, setup, statistics import, session repair
 and re-authentication inside a real Home Assistant with the MAST API mocked. Renewal tests cover expired JWTs,
-opaque-token rotation, failure handling, and credential binding to a meter. The current suite has 57 passing
-tests against Home Assistant 2026.10.4:
+opaque-token rotation, failure handling, and credential binding to a meter:
 
 ```bash
 pip install pytest-homeassistant-custom-component

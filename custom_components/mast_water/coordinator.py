@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
-from homeassistant.components.recorder.statistics import async_add_external_statistics
+from homeassistant.components.recorder.statistics import (
+    StatisticsRow,
+    async_add_external_statistics,
+    statistics_during_period,
+)
+from homeassistant.components.recorder.util import get_instance
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -25,6 +30,7 @@ from .const import (
     CONF_USER_TOKEN,
     DOMAIN,
     SMALL_CHUNK_DAYS,
+    STATISTICS_REPAIR_VERSION,
     STORE_VERSION,
     TOKEN_RENEWAL_WINDOW,
     UPDATE_INTERVAL,
@@ -32,6 +38,7 @@ from .const import (
 from .helpers import Reading, build_rows, token_expiry, token_issued
 
 _LOGGER = logging.getLogger(__name__)
+_STATISTIC_TOLERANCE = 0.000001  # build_rows rounds sums to six decimal places
 
 try:  # Home Assistant 2025.x+ replaced has_mean with mean_type
     from homeassistant.components.recorder.models import StatisticMeanType
@@ -232,15 +239,24 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             await self._client.async_restore_session()
             return await self._client.async_get_readings(start, end)
 
-    async def _fetch(self, start: date, end: date) -> list[Reading]:
-        """Fetch [start, end] in chunks. Old failing chunks are skipped."""
+    async def _fetch(
+        self,
+        start: date,
+        end: date,
+        *,
+        strict: bool = False,
+    ) -> list[Reading]:
+        """Fetch [start, end) in chunks. Old failing chunks are skipped."""
         readings: list[Reading] = []
         cursor = start
         last_error: Exception | None = None
-        while cursor <= end:
-            chunk_end = min(cursor + timedelta(days=self._chunk_days - 1), end)
+        while cursor < end:
+            # MAST excludes dateTo. Adjacent windows must therefore share a
+            # boundary, and the final request must not extend past today.
+            chunk_end = min(cursor + timedelta(days=self._chunk_days), end)
             try:
-                readings += await self._get_readings(cursor, chunk_end)
+                chunk_readings = await self._get_readings(cursor, chunk_end)
+                readings += chunk_readings
                 last_error = None
             except MastAuthError as err:
                 raise self._auth_exception(err) from err
@@ -261,15 +277,116 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
                     self._chunk_days = SMALL_CHUNK_DAYS
                     continue  # retry the same range in smaller pieces
                 else:
+                    if strict:
+                        raise UpdateFailed(f"MAST API error: {err}") from err
                     _LOGGER.warning(
                         "MAST range %s..%s failed: %s", cursor, chunk_end, err
                     )
                     last_error = err
-            cursor = chunk_end + timedelta(days=1)
+            cursor = chunk_end
         if last_error is not None:
             # The most recent chunk failed, so there is nothing trustworthy.
             raise UpdateFailed(f"MAST API error: {last_error}")
         return readings
+
+    async def _statistic_rows(
+        self, start_day: date, end_day: date
+    ) -> list[StatisticsRow]:
+        """Read saved hourly statistics; row starts are Unix timestamps."""
+        tz = dt_util.DEFAULT_TIME_ZONE
+        start = datetime.combine(start_day, time.min, tzinfo=tz)
+        end = datetime.combine(end_day, time.min, tzinfo=tz)
+        stat_id = statistic_id(self._card)
+        found = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            end,
+            {stat_id},
+            "hour",
+            None,
+            {"state", "sum"},
+        )
+        return found.get(stat_id, [])
+
+    async def _repair_historical_statistics(self, stored: dict, today: date) -> None:
+        """Reimport old rows once, filling days lost at exclusive dateTo boundaries.
+
+        Anchor the reconstructed sums at the last value already stored so the
+        Energy dashboard's running total does not jump during this repair.
+        """
+        anchor_day = date.fromisoformat(stored["day"])
+        if anchor_day >= today:
+            raise UpdateFailed("Cannot repair history before the next meter day")
+        existing = await self._statistic_rows(
+            today - timedelta(days=BACKFILL_DAYS), anchor_day + timedelta(days=1)
+        )
+        if not existing:
+            raise UpdateFailed("No saved MAST statistics to anchor the repair")
+        first_day = datetime.fromtimestamp(
+            min(row["start"] for row in existing), dt_util.DEFAULT_TIME_ZONE
+        ).date()
+        fetched = await self._fetch(
+            first_day,
+            anchor_day + timedelta(days=1),
+            strict=True,
+        )
+        by_day = {reading.day: reading for reading in fetched}
+        existing_days = {
+            datetime.fromtimestamp(row["start"], dt_util.DEFAULT_TIME_ZONE).date()
+            for row in existing
+        }
+        if not existing_days.issubset(by_day):
+            raise UpdateFailed("MAST omitted previously imported meter days")
+        readings = [by_day[day] for day in sorted(by_day) if day <= anchor_day]
+        if not readings or readings[-1].day != anchor_day:
+            raise UpdateFailed("MAST did not return the stored anchor day")
+        if abs(readings[-1].value - stored["reading"]) > _STATISTIC_TOLERANCE:
+            raise UpdateFailed("MAST changed the stored anchor reading")
+
+        first_sum = stored["sum"]
+        for index in range(len(readings) - 1, 0, -1):
+            delta = readings[index].value - readings[index - 1].value
+            first_sum -= max(delta, 0.0)
+        if first_sum < -_STATISTIC_TOLERANCE:
+            raise UpdateFailed("MAST history cannot be reconciled with the saved total")
+        rows, _, _, _ = build_rows(
+            readings,
+            dt_util.DEFAULT_TIME_ZONE,
+            readings[0].value,
+            first_sum,
+            None,
+        )
+        async_add_external_statistics(
+            self.hass,
+            _metadata(self._card),
+            [
+                StatisticData(start=row.start, state=row.state, sum=row.sum)
+                for row in rows
+            ],
+        )
+        await get_instance(self.hass).async_block_till_done()
+        imported = {
+            row["start"]: row
+            for row in await self._statistic_rows(
+                first_day, anchor_day + timedelta(days=1)
+            )
+        }
+        for row in rows:
+            saved = imported.get(row.start.timestamp())
+            if (
+                saved is None
+                or saved.get("state") is None
+                or saved.get("sum") is None
+                or abs(saved["state"] - row.state) > _STATISTIC_TOLERANCE
+                or abs(saved["sum"] - row.sum) > _STATISTIC_TOLERANCE
+            ):
+                raise UpdateFailed(
+                    f"MAST statistic for {row.start.date()} was not saved"
+                )
+        _LOGGER.info(
+            "Reimported %d MAST statistics rows to repair date boundaries", len(rows)
+        )
 
     async def _async_update_data(self) -> MastData:
         await self._renew_if_needed()
@@ -277,7 +394,35 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         stored = await self._store.async_load() or {}
         anchor_day = date.fromisoformat(stored["day"]) if stored.get("day") else None
         today = dt_util.now().date()
-        start = anchor_day if anchor_day else today - timedelta(days=BACKFILL_DAYS)
+        if (
+            anchor_day
+            and not stored.get("exclusive_end_repaired")
+            and (
+                stored.get("exclusive_end_repair_attempt_day") != today.isoformat()
+                or stored.get("exclusive_end_repair_version")
+                != STATISTICS_REPAIR_VERSION
+            )
+        ):
+            stored["exclusive_end_repair_attempt_day"] = today.isoformat()
+            stored["exclusive_end_repair_version"] = STATISTICS_REPAIR_VERSION
+            await self._store.async_save(stored)
+            try:
+                await self._repair_historical_statistics(stored, today)
+            except UpdateFailed as err:
+                _LOGGER.warning("Could not repair old MAST statistics yet: %s", err)
+            except Exception:
+                _LOGGER.exception("Unexpected error repairing old MAST statistics")
+            else:
+                stored.pop("exclusive_end_repair_attempt_day", None)
+                stored["exclusive_end_repaired"] = True
+                await self._store.async_save(stored)
+        # Include the previous daily value so the usage sensor can still compute
+        # a delta when the saved anchor is already the latest available reading.
+        start = (
+            anchor_day - timedelta(days=1)
+            if anchor_day
+            else today - timedelta(days=BACKFILL_DAYS)
+        )
 
         try:
             fetched = await self._fetch(start, today)
@@ -297,13 +442,20 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             anchor_day,
         )
         if rows:
+            if anchor_day is None:
+                stored["exclusive_end_repaired"] = True
             async_add_external_statistics(
                 self.hass,
                 _metadata(self._card),
                 [StatisticData(start=r.start, state=r.state, sum=r.sum) for r in rows],
             )
             await self._store.async_save(
-                {"reading": a_reading, "sum": a_sum, "day": a_day.isoformat()}
+                {
+                    **stored,
+                    "reading": a_reading,
+                    "sum": a_sum,
+                    "day": a_day.isoformat(),
+                }
             )
             _LOGGER.debug("Imported %d statistics rows up to %s", len(rows), a_day)
 
