@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import aiohttp
@@ -181,7 +181,7 @@ class MastClient:
                     ):
                         raise MastAuthError("MAST session resume rejected")
                     expiry = token_expiry(clean_token(candidate or ""))
-                    if expiry is None or expiry <= datetime.now(timezone.utc):
+                    if expiry is None or expiry <= datetime.now(UTC):
                         raise MastApiError("Session resume returned no valid JWT")
                     user = payload.get("user")
                     returned = user.get("token") if isinstance(user, dict) else None

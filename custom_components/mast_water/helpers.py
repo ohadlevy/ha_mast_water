@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone, tzinfo
+from datetime import UTC, date, datetime, tzinfo
 from typing import Any
 
 
@@ -48,7 +48,7 @@ def _claim_time(token: str, claim: str) -> datetime | None:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload))
-        return datetime.fromtimestamp(int(claims[claim]), tz=timezone.utc)
+        return datetime.fromtimestamp(int(claims[claim]), tz=UTC)
     except (IndexError, ValueError, KeyError, TypeError):
         return None
 
@@ -66,7 +66,7 @@ def token_issued(token: str) -> datetime | None:
 def parse_cards(payload: Any) -> list[Card]:
     """Parse GetWaterMeterCards into cards, skipping malformed entries."""
     if not isinstance(payload, list):
-        raise ValueError("expected a list of cards")
+        raise TypeError("expected a list of cards")
     cards: list[Card] = []
     for item in payload:
         try:
@@ -81,7 +81,7 @@ def parse_cards(payload: Any) -> list[Card]:
 def parse_readings(payload: Any) -> list[Reading]:
     """Parse the API response into sorted, de-duplicated daily readings."""
     if not isinstance(payload, list):
-        raise ValueError("expected a list of readings")
+        raise TypeError("expected a list of readings")
     by_day: dict[date, float] = {}
     for item in payload:
         try:

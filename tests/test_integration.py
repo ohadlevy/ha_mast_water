@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +16,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mast_water.api import (
     MastApiError,
     MastAuthError,
+)
+from custom_components.mast_water.api import (
     MastClient as _MastClient,
 )
 from custom_components.mast_water.const import (
@@ -35,14 +37,26 @@ def mk_token(hours: float) -> str:
     def b(o):
         return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
 
-    exp = int((datetime.now(timezone.utc) + timedelta(hours=hours)).timestamp())
+    exp = int((datetime.now(UTC) + timedelta(hours=hours)).timestamp())
     return f"{b({'alg': 'HS256'})}.{b({'exp': exp})}.sig"
 
 
 def readings() -> list[Reading]:
     """Twelve consecutive days ending yesterday, cumulative, 11.864 m3 apart end to end."""
-    values = [380.723, 381.59, 382.531, 384.059, 384.671, 385.86,
-              386.898, 387.76, 389.269, 390.051, 391.371, 392.587]
+    values = [
+        380.723,
+        381.59,
+        382.531,
+        384.059,
+        384.671,
+        385.86,
+        386.898,
+        387.76,
+        389.269,
+        390.051,
+        391.371,
+        392.587,
+    ]
     last = date.today() - timedelta(days=1)
     return [Reading(last - timedelta(days=11 - i), v) for i, v in enumerate(values)]
 
@@ -102,9 +116,15 @@ async def test_setup_imports_statistics_and_creates_sensors(
     assert all(r["start"].hour == 0 and r["start"].tzinfo for r in rows)
 
     reg = er.async_get(hass)
-    reading = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_meter_reading"))
-    usage = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_daily_usage"))
-    expiry = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry"))
+    reading = hass.states.get(
+        reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_meter_reading")
+    )
+    usage = hass.states.get(
+        reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_daily_usage")
+    )
+    expiry = hass.states.get(
+        reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry")
+    )
     assert float(reading.state) == pytest.approx(392.587)
     assert float(usage.state) == pytest.approx(1.216)
     assert expiry.state not in ("unknown", "unavailable")
@@ -157,7 +177,9 @@ async def test_renewed_token_is_persisted_by_the_coordinator(
     entry = make_entry(old)
 
     async def readings_and_renew(self, date_from, date_to):
-        self._adopt_new_token(f"Bearer {renewed}")  # what the real client does on a response
+        self._adopt_new_token(
+            f"Bearer {renewed}"
+        )  # what the real client does on a response
         return await fake_get_readings(self, date_from, date_to)
 
     with patch(f"{API}.async_get_readings", readings_and_renew), patch(STATS):
@@ -166,8 +188,12 @@ async def test_renewed_token_is_persisted_by_the_coordinator(
     assert entry.state is ConfigEntryState.LOADED
     assert entry.data[CONF_TOKEN] == renewed
     reg = er.async_get(hass)
-    expiry = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry"))
-    assert datetime.fromisoformat(expiry.state) > datetime.now(timezone.utc) + timedelta(hours=40)
+    expiry = hass.states.get(
+        reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry")
+    )
+    assert datetime.fromisoformat(expiry.state) > datetime.now(UTC) + timedelta(
+        hours=40
+    )
 
 
 # --------------------------------------------------- range limits and "no data"
@@ -195,7 +221,10 @@ async def test_falls_back_to_7_day_ranges_when_mast_rejects_30(
 ):
     """Some water corporations (Arad meters) only allow 7 days per request."""
     entry = make_entry(mk_token(48))
-    with patch(f"{API}.async_get_readings", limited_get_readings(6)), patch(STATS) as stats:
+    with (
+        patch(f"{API}.async_get_readings", limited_get_readings(6)),
+        patch(STATS) as stats,
+    ):
         await setup_entry(hass, entry)
     assert entry.state is ConfigEntryState.LOADED
     assert len(stats.call_args.args[2]) == 12
@@ -221,7 +250,13 @@ async def test_other_errors_on_the_latest_chunk_still_fail_the_update(
     hass: HomeAssistant, recorder_mock, hass_storage
 ):
     entry = make_entry(mk_token(48))
-    with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastApiError("HTTP 500", 500))), patch(STATS):
+    with (
+        patch(
+            f"{API}.async_get_readings",
+            AsyncMock(side_effect=MastApiError("HTTP 500", 500)),
+        ),
+        patch(STATS),
+    ):
         await setup_entry(hass, entry)
     assert entry.state is ConfigEntryState.SETUP_RETRY
 
@@ -229,7 +264,9 @@ async def test_other_errors_on_the_latest_chunk_still_fail_the_update(
 # ------------------------------------------------------------------ error messages
 
 
-async def _call_with_response(status: int, body: str, content_type: str = "application/json"):
+async def _call_with_response(
+    status: int, body: str, content_type: str = "application/json"
+):
     from aiohttp import ClientSession, web
     from aiohttp.test_utils import TestServer
 
@@ -244,7 +281,9 @@ async def _call_with_response(status: int, body: str, content_type: str = "appli
     await server.start_server()
     try:
         async with ClientSession() as session:
-            client = MastClient(session, mk_token(48), CARD, "110", server.make_url("/r"))
+            client = MastClient(
+                session, mk_token(48), CARD, "110", server.make_url("/r")
+            )
             return await client.async_get_readings(date(2026, 10, 1), date(2026, 10, 2))
     finally:
         await server.close()
@@ -267,7 +306,13 @@ async def test_blocked_403_does_not_start_reauth(
     hass: HomeAssistant, recorder_mock, hass_storage
 ):
     entry = make_entry(mk_token(48))
-    with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastApiError("HTTP 403 (blocked)", 403))), patch(STATS):
+    with (
+        patch(
+            f"{API}.async_get_readings",
+            AsyncMock(side_effect=MastApiError("HTTP 403 (blocked)", 403)),
+        ),
+        patch(STATS),
+    ):
         await setup_entry(hass, entry)
     assert entry.state is ConfigEntryState.SETUP_RETRY  # retried later, no login prompt
     assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
@@ -280,7 +325,9 @@ async def test_token_sensor_exposes_issue_time_and_renewals(
     with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
         await setup_entry(hass, entry)
     reg = er.async_get(hass)
-    state = hass.states.get(reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry"))
+    state = hass.states.get(
+        reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry")
+    )
     assert state.attributes["renewals_since_start"] == 0
     assert state.attributes["issued"] is None  # test tokens carry no iat claim
 
@@ -303,7 +350,10 @@ async def test_access_token_sensor_keeps_existing_entity_id(
     with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
-    assert reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry") == legacy_entity_id
+    assert (
+        reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_token_expiry")
+        == legacy_entity_id
+    )
     assert hass.states.get(legacy_entity_id).attributes["friendly_name"] == (
         "MAST water meter Access token expires"
     )
@@ -342,7 +392,10 @@ async def test_refused_live_token_is_retried_before_asking_for_login(
 
         await coordinator.async_refresh()  # third strike
         await hass.async_block_till_done()
-    assert [f["context"]["source"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)] == [SOURCE_REAUTH]
+    assert [
+        f["context"]["source"]
+        for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    ] == [SOURCE_REAUTH]
 
 
 async def test_success_after_a_refusal_resets_the_counter(
@@ -352,7 +405,10 @@ async def test_success_after_a_refusal_resets_the_counter(
     with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
         await setup_entry(hass, entry)
         coordinator = entry.runtime_data
-        with patch(f"{API}.async_get_readings", AsyncMock(side_effect=MastAuthError("HTTP 401"))):
+        with patch(
+            f"{API}.async_get_readings",
+            AsyncMock(side_effect=MastAuthError("HTTP 401")),
+        ):
             await coordinator.async_refresh()
         assert coordinator.auth_failures == 1
         await coordinator.async_refresh()
@@ -368,17 +424,22 @@ async def test_refused_token_that_has_expired_asks_for_login_immediately(
     with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS):
         await setup_entry(hass, entry)
         coordinator = entry.runtime_data
-        coordinator._expiry = datetime.now(timezone.utc) - timedelta(minutes=1)
+        coordinator._expiry = datetime.now(UTC) - timedelta(minutes=1)
         # The proactive expiry check fires before any request is made.
         await coordinator.async_refresh()
         await hass.async_block_till_done()
-    assert [f["context"]["source"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)] == [SOURCE_REAUTH]
+    assert [
+        f["context"]["source"]
+        for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    ] == [SOURCE_REAUTH]
 
 
 # --------------------------------------------- restoring the MAST session on a refusal
 
 
-_REAL_RESTORE = _MastClient.async_restore_session  # captured before the fixture below replaces it
+_REAL_RESTORE = (
+    _MastClient.async_restore_session
+)  # captured before the fixture below replaces it
 
 
 @pytest.fixture(autouse=True)
@@ -439,7 +500,10 @@ async def test_expired_token_is_neither_restored_nor_retried(
         await setup_entry(hass, entry)
     assert refused.await_count == 0  # caught before any request
     restore.assert_not_awaited()
-    assert [f["context"]["source"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)] == [SOURCE_REAUTH]
+    assert [
+        f["context"]["source"]
+        for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    ] == [SOURCE_REAUTH]
 
 
 async def _restore_with_server(handlers: dict):
@@ -466,7 +530,10 @@ async def _restore_with_server(handlers: dict):
     try:
         async with ClientSession() as session:
             client = MastClient(
-                session, mk_token(48), CARD, "110",
+                session,
+                mk_token(48),
+                CARD,
+                "110",
                 cards_url=str(server.make_url("/cards")),
                 validate_url=str(server.make_url("/validate")),
             )
@@ -480,8 +547,12 @@ async def test_restore_session_validates_assets_then_loads_cards(socket_enabled)
 
     ok, seen = await _restore_with_server(
         {
-            "/validate": lambda r: web.json_response({"isValid": True, "message": None}),
-            "/cards": lambda r: web.json_response([{"waterCardNumber": CARD, "address": "x"}]),
+            "/validate": lambda r: web.json_response(
+                {"isValid": True, "message": None}
+            ),
+            "/cards": lambda r: web.json_response(
+                [{"waterCardNumber": CARD, "address": "x"}]
+            ),
         }
     )
     assert ok is True
@@ -491,9 +562,11 @@ async def test_restore_session_validates_assets_then_loads_cards(socket_enabled)
 async def test_restore_session_reports_failure(socket_enabled):
     from aiohttp import web
 
-    ok, seen = await _restore_with_server(
+    ok, _ = await _restore_with_server(
         {
-            "/validate": lambda r: web.json_response({"isValid": False, "message": "no"}),
+            "/validate": lambda r: web.json_response(
+                {"isValid": False, "message": "no"}
+            ),
             "/cards": lambda r: web.json_response([]),
         }
     )
@@ -501,7 +574,9 @@ async def test_restore_session_reports_failure(socket_enabled):
     with pytest.raises(MastAuthError):
         await _restore_with_server(
             {
-                "/validate": lambda r: web.json_response({"reason": "expired"}, status=401),
+                "/validate": lambda r: web.json_response(
+                    {"reason": "expired"}, status=401
+                ),
                 "/cards": lambda r: web.json_response([]),
             }
         )

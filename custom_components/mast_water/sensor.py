@@ -74,7 +74,10 @@ class MastSensor(CoordinatorEntity[MastCoordinator], SensorEntity):
     entity_description: MastSensorDescription
 
     def __init__(
-        self, coordinator: MastCoordinator, card: str, description: MastSensorDescription
+        self,
+        coordinator: MastCoordinator,
+        card: str,
+        description: MastSensorDescription,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
