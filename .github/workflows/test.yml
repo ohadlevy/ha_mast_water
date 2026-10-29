@@ -27,6 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-test.txt
 
+      - name: Run Ruff Lint & Format Check
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Validate with Hassfest
+        uses: home-assistant/actions/hassfest@master
+
       - name: Run Tests
         run: |
           pytest --cov=custom_components/mast_water --cov-report=xml
