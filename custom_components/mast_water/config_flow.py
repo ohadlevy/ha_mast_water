@@ -7,7 +7,6 @@ from datetime import timedelta
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -143,6 +142,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders={"mast_url": "https://mast.co.il"},
         )
 
     async def async_step_card(
@@ -224,6 +224,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 {vol.Optional(CONF_USER_TOKEN): USER_TOKEN_SELECTOR}
             ),
             errors=errors,
+            description_placeholders={"mast_url": "https://mast.co.il"},
         )
 
     async def async_step_reauth(
@@ -276,4 +277,5 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders={"mast_url": "https://mast.co.il"},
         )

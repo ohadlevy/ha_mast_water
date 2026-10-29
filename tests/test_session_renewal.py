@@ -3,9 +3,9 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-import pytest
 from homeassistant.config_entries import (
     SOURCE_REAUTH,
     SOURCE_RECONFIGURE,
@@ -22,6 +22,7 @@ from custom_components.mast_water.api import (
     MastConnectionError,
 )
 from custom_components.mast_water.const import CONF_TOKEN, CONF_USER_TOKEN, DOMAIN
+
 from .test_integration import (
     API,
     CARD,

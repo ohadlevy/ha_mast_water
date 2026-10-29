@@ -1,0 +1,50 @@
+name: Bug report
+description: Create a report to help us fix a bug
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the issue...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: To Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Go to...
+        2. Click on...
+        3. Scroll down to...
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Home Assistant Log Output
+      description: Please paste any relevant log output or traceback. Make sure to redact sensitive info!
+      placeholder: |
+        <details>
+        <summary>Logs</summary>
+
+        ```text
+        Paste logs here...
+        ```
+
+        </details>
+    validations:
+      required: false
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: What version of Home Assistant and MAST Water integration are you running?
+      placeholder: |
+        - Home Assistant Core: 2025.x.x
+        - Integration Version: 0.x.x
+    validations:
+      required: true
