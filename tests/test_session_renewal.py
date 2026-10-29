@@ -554,3 +554,30 @@ async def test_reauth_reports_invalid_assets_separately(
             flow["flow_id"], {CONF_USER_TOKEN: "credential"}
         )
     assert result["errors"] == {"base": "assets_invalid"}
+
+
+async def test_user_flow_translation_rendering(hass):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
+
+
+async def test_reconfigure_flow_translation_rendering(hass):
+    entry = make_entry(mk_token(48))
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+
+async def test_reauth_flow_translation_rendering(hass, recorder_mock, hass_storage):
+    entry_expired = make_entry(mk_token(-1))
+    with patch(STATS):
+        await setup_entry(hass, entry_expired)
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    reauth_flow = next(f for f in flows if f["step_id"] == "reauth_confirm")
+    assert reauth_flow["step_id"] == "reauth_confirm"
