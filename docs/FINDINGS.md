@@ -27,7 +27,7 @@ Base `https://api.mast.co.il/mast/api/`. Headers: `jwt: Bearer <token>` (not `Au
 
 | Method and path | Purpose | Notes |
 |---|---|---|
-| `POST WaterMeter/GetWaterMeterCardReading` | Daily readings | Body `{"waterCardNumber","dateFrom","dateTo"}` (`YYYY-MM-DD`). Returns `[{"readingDate":"2026-10-01T00:00:00","reading":380.723}, ...]`. |
+| `POST WaterMeter/GetWaterMeterCardReading` | Daily readings | Body `{"waterCardNumber","dateFrom","dateTo"}` (`YYYY-MM-DD`); `dateTo` is exclusive. Returns `[{"readingDate":"2026-10-01T00:00:00","reading":380.723}, ...]`. |
 | `GET WaterMeter/GetWaterMeterCards` | The account's water cards | Returns `[{"waterCardNumber","address"}]`. |
 | `GET PersonalAreaAsset/ValidateUserAssets` | Route guard the web app runs before the water page | Returns `{"isValid": bool, "message": ...}`. |
 | `POST users/LogIn` | Login step 1: send the SMS | Body has `phone`, `isVocalMessage`, `originLogin`, `recaptchaCode`. |
@@ -53,6 +53,14 @@ client timer), and does not accept a resident token.
 - The newest reading is about a day old.
 - **Range limit:** at most 30 days between `dateFrom` and `dateTo`, or 7 days when the company's meter supplier is
   `Arad` or `AradHarmony`. The date picker goes back about 730 days.
+- **Exclusive end:** On 2026-10-29, requests for 2026-10-06 through 2026-10-12, 10-13 through 10-19, and
+  10-20 through 10-26 each returned six readings and omitted the `dateTo` day. Extending the first request
+  through 10-13 returned the 10-12 reading. A 30-day request from 2026-09-29 through 10-29 returned 30
+  readings, ending on 10-28. A seven-day request ending on tomorrow's date returned HTTP 400. The integration
+  now uses adjacent exclusive-end windows and caps the final `dateTo` at today. Existing installations reread
+  from their earliest saved statistic, then reimport the returned rows with sums anchored to the saved latest
+  total. The repair checks the recorder's saved rows before marking itself complete. A failed repair is retried
+  on a later day while normal polling continues.
 - **Status codes as the web app reads them:** `404` = no data in the range, `400` = invalid dates, other = error.
   A wrong card number gives HTTP `500` with a generic Hebrew message (`שגיאה בהצגת הנתונים`, "error displaying the
   data").

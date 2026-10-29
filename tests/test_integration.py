@@ -62,12 +62,12 @@ def readings() -> list[Reading]:
 
 
 def limited_get_readings(max_span_days: int):
-    """Fake API that rejects ranges longer than the web app allows (HTTP 400)."""
+    """Fake MAST's exclusive dateTo and its maximum request span."""
 
     async def _get(self, date_from, date_to):
         if (date_to - date_from).days > max_span_days:
             raise MastApiError("HTTP 400", 400)
-        return [r for r in readings() if date_from <= r.day <= date_to]
+        return [r for r in readings() if date_from <= r.day < date_to]
 
     return _get
 
@@ -212,7 +212,7 @@ async def test_requests_never_exceed_the_30_day_limit(
     with patch(f"{API}.async_get_readings", spy), patch(STATS) as stats:
         await setup_entry(hass, entry)
     assert entry.state is ConfigEntryState.LOADED
-    assert spans and max(spans) <= 29  # same 30-day window the web app uses by default
+    assert spans and max(spans) <= 30  # same 30-day window the web app uses by default
     assert len(stats.call_args.args[2]) == 12  # full history still imported
 
 
@@ -222,13 +222,142 @@ async def test_falls_back_to_7_day_ranges_when_mast_rejects_30(
     """Some water corporations (Arad meters) only allow 7 days per request."""
     entry = make_entry(mk_token(48))
     with (
-        patch(f"{API}.async_get_readings", limited_get_readings(6)),
+        patch(f"{API}.async_get_readings", limited_get_readings(7)),
         patch(STATS) as stats,
     ):
         await setup_entry(hass, entry)
     assert entry.state is ConfigEntryState.LOADED
     assert len(stats.call_args.args[2]) == 12
+    assert [row["start"].date() for row in stats.call_args.args[2]] == [
+        item.day for item in readings()
+    ]
     assert entry.runtime_data._chunk_days == 7
+
+
+async def test_upgrade_reimports_missing_boundary_days_with_original_total(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with (
+        patch(f"{API}.async_get_readings", limited_get_readings(7)),
+        patch(STATS) as stats,
+    ):
+        await setup_entry(hass, entry)
+        coordinator = entry.runtime_data
+        stored = await coordinator._store.async_load()
+        original_sum = stored["sum"]
+        stored.pop("exclusive_end_repaired")  # state written by an older release
+        await coordinator._store.async_save(stored)
+        saved_rows = [
+            {
+                "start": row["start"].timestamp(),
+                "state": row["state"],
+                "sum": row["sum"],
+            }
+            for row in stats.call_args.args[2]
+        ]
+        stats.reset_mock()
+
+        async def reject_before_saved_day(self, date_from, date_to):
+            if date_from < readings()[0].day:
+                raise MastApiError("HTTP 500", 500)
+            return await limited_get_readings(7)(self, date_from, date_to)
+
+        with (
+            patch(f"{API}.async_get_readings", reject_before_saved_day),
+            patch.object(
+                coordinator,
+                "_statistic_rows",
+                AsyncMock(side_effect=[saved_rows[:5] + saved_rows[6:], saved_rows]),
+            ),
+            patch("custom_components.mast_water.coordinator.get_instance") as recorder,
+        ):
+            recorder.return_value.async_block_till_done = AsyncMock()
+            await coordinator.async_refresh()
+            recorder.return_value.async_block_till_done.assert_awaited_once()
+        stats.assert_called_once()
+        repaired_rows = stats.call_args.args[2]
+        assert [row["start"].date() for row in repaired_rows] == [
+            reading.day for reading in readings()
+        ]
+        assert repaired_rows[-1]["sum"] == pytest.approx(original_sum)
+        assert (await coordinator._store.async_load())["exclusive_end_repaired"] is True
+
+        await coordinator.async_refresh()
+        stats.assert_called_once()  # no second full-history repair
+
+
+async def test_repair_waits_until_missing_statistics_are_saved(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS) as stats:
+        await setup_entry(hass, entry)
+        coordinator = entry.runtime_data
+        stored = await coordinator._store.async_load()
+        stored.pop("exclusive_end_repaired")
+        await coordinator._store.async_save(stored)
+        saved_rows = [
+            {
+                "start": row["start"].timestamp(),
+                "state": row["state"],
+                "sum": row["sum"],
+            }
+            for row in stats.call_args.args[2]
+        ]
+        stats.reset_mock()
+
+        with (
+            patch.object(
+                coordinator,
+                "_statistic_rows",
+                AsyncMock(side_effect=[saved_rows, saved_rows[:5] + saved_rows[6:]]),
+            ),
+            patch("custom_components.mast_water.coordinator.get_instance") as recorder,
+        ):
+            recorder.return_value.async_block_till_done = AsyncMock()
+            await coordinator.async_refresh()
+
+    stats.assert_called_once()
+    assert coordinator.last_update_success
+    assert "exclusive_end_repaired" not in await coordinator._store.async_load()
+
+
+@pytest.mark.parametrize("status", [403, 500])
+async def test_failed_history_repair_does_not_block_new_readings(
+    hass: HomeAssistant, recorder_mock, hass_storage, status: int
+):
+    entry = make_entry(mk_token(48))
+    with patch(f"{API}.async_get_readings", fake_get_readings), patch(STATS) as stats:
+        await setup_entry(hass, entry)
+    coordinator = entry.runtime_data
+    stored = await coordinator._store.async_load()
+    stored.pop("exclusive_end_repaired")
+    await coordinator._store.async_save(stored)
+    coordinator._chunk_days = 7
+    saved_rows = [
+        {"start": row["start"].timestamp(), "state": row["state"], "sum": row["sum"]}
+        for row in stats.call_args.args[2]
+    ]
+
+    async def fail_old_ranges(self, date_from, date_to):
+        if date_from == readings()[0].day:
+            raise MastApiError(f"HTTP {status}", status)
+        return await fake_get_readings(self, date_from, date_to)
+
+    with (
+        patch(f"{API}.async_get_readings", fail_old_ranges),
+        patch(STATS),
+        patch.object(
+            coordinator, "_statistic_rows", AsyncMock(return_value=saved_rows)
+        ),
+    ):
+        await coordinator.async_refresh()
+        assert coordinator.last_update_success
+        assert "exclusive_end_repaired" not in await coordinator._store.async_load()
+        await coordinator.async_refresh()
+        assert coordinator.last_update_success
+    assert (await coordinator._store.async_load())["exclusive_end_repair_attempt_day"]
 
 
 async def test_404_means_no_data_not_an_error(
