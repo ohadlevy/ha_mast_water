@@ -1,7 +1,12 @@
 {
   "domain": "mast_water",
   "name": "MAST Water",
-  "codeowners": [],
+  "codeowners": [
+    "@ohadlevy"
+  ],
+  "categories": [
+    "energy"
+  ],
   "config_flow": true,
   "dependencies": ["recorder"],
   "documentation": "https://github.com/ohadlevy/ha_mast_water",
