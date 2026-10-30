@@ -131,8 +131,10 @@ class MastClient:
         headers = self._headers()
         if resume:
             # The app's remembered-login credential works independently of the
-            # old JWT. In particular, never attach an expired JWT to this call.
-            headers.pop("jwt")
+            # old JWT and company context. In particular, never attach an expired JWT
+            # or company ID to this global call.
+            headers.pop("jwt", None)
+            headers.pop("X-CompanyId", None)
         try:
             async with self._session.request(
                 method,

@@ -61,7 +61,7 @@ async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled, old
         assert request.query["token"] == "remembered-credential"
         assert "jwt" not in request.headers
         assert "Cookie" not in request.headers
-        assert request.headers["X-CompanyId"] == "110"
+        assert "X-CompanyId" not in request.headers
         return web.json_response(
             {"isSuccess": True, "user": {"token": "rotated-credential"}},
             headers={"new-token": "Bearer " + renewed},
