@@ -9,7 +9,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import API_URL, CARDS_URL, ORIGIN, RESUME_URL, VALIDATE_URL
+from .const import API_URL, CARDS_URL, CITIES_URL, ORIGIN, RESUME_URL, VALIDATE_URL
 from .helpers import (
     Card,
     Reading,
@@ -74,6 +74,7 @@ class MastClient:
         *,
         user_token: str = "",
         resume_url: str = RESUME_URL,
+        cities_url: str = CITIES_URL,
     ) -> None:
         self._session = session
         self._token = token
@@ -84,6 +85,7 @@ class MastClient:
         self._validate_url = validate_url
         self._user_token = user_token
         self._resume_url = resume_url
+        self._cities_url = cities_url
 
     @property
     def token(self) -> str:
@@ -114,15 +116,17 @@ class MastClient:
             self._token = candidate
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/plain, */*",
-            "jwt": f"Bearer {self._token}",
             "X-CompanyId": self._company,
             "Origin": ORIGIN,
             "Referer": f"{ORIGIN}/",
             "User-Agent": "Mozilla/5.0 (compatible; HomeAssistant mast_water)",
         }
+        if self._token:
+            headers["jwt"] = f"Bearer {self._token}"
+        return headers
 
     async def _request(
         self, method: str, url: str, *, resume: bool = False, **kwargs: Any
@@ -132,7 +136,7 @@ class MastClient:
         if resume:
             # The app's remembered-login credential works independently of the
             # old JWT. In particular, never attach an expired JWT to this call.
-            headers.pop("jwt")
+            headers.pop("jwt", None)
         try:
             async with self._session.request(
                 method,
@@ -238,3 +242,10 @@ class MastClient:
             return parse_cards(payload)
         except ValueError as err:
             raise MastApiError(f"unexpected response: {err}") from err
+
+    async def async_get_cities(self) -> list[dict[str, Any]]:
+        """Fetch available water corporations and cities."""
+        payload = await self._request("GET", self._cities_url)
+        if not isinstance(payload, dict):
+            return []
+        return payload.get("companyDetailsMediaList", [])
