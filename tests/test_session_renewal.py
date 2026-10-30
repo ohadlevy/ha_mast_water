@@ -61,7 +61,7 @@ async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled, old
         assert request.query["token"] == "remembered-credential"
         assert "jwt" not in request.headers
         assert "Cookie" not in request.headers
-        assert "X-CompanyId" not in request.headers
+        assert request.headers["X-CompanyId"] == "110"
         return web.json_response(
             {"isSuccess": True, "user": {"token": "rotated-credential"}},
             headers={"new-token": "Bearer " + renewed},
@@ -81,6 +81,39 @@ async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled, old
         await client.async_resume_session()
         assert client.token == renewed
         assert client.user_token == "rotated-credential"
+
+
+async def test_resume_extracts_company_id_from_user_companies(socket_enabled):
+    renewed = mk_token(48)
+
+    async def resume(request):
+        return web.json_response(
+            {
+                "isSuccess": True,
+                "user": {
+                    "token": "rotated-credential",
+                    "userCompanies": [
+                        {"companyId": 110, "isActiveCompany": False},
+                        {"companyId": 12, "isActiveCompany": True},
+                    ],
+                },
+            },
+            headers={"new-token": "Bearer " + renewed},
+        )
+
+    app = web.Application()
+    app.router.add_get("/resume", resume)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        client = MastClient(
+            session,
+            "",
+            CARD,
+            "110",
+            user_token="remembered-credential",
+            resume_url=str(server.make_url("/resume")),
+        )
+        await client.async_resume_session()
+        assert client.company_id == "12"
 
 
 @pytest.mark.parametrize(

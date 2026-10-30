@@ -30,6 +30,14 @@ class MastAuthError(MastError):
     """The token was rejected or has expired."""
 
 
+class MastCompanyError(MastAuthError):
+    """MAST does not accept the X-CompanyId for this account (401 "Company Not valid").
+
+    A subclass of MastAuthError so existing handlers keep treating it as an auth
+    failure, while the config flow can tell the user the Company ID is the problem.
+    """
+
+
 class MastApiError(MastError):
     """The API returned an error or an unexpected response."""
 
@@ -57,6 +65,16 @@ def error_reason(text: str) -> str | None:
             if body.get(key):
                 return str(body[key])[:200]
     return None
+
+
+def _sanitize_log_text(text: str, secret: str = "") -> str:
+    """Remove or redact sensitive credentials from text before logging."""
+    if not text:
+        return ""
+    sanitized = text[:200]
+    if secret:
+        sanitized = sanitized.replace(secret, "[REDACTED]")
+    return sanitized
 
 
 class MastClient:
@@ -95,6 +113,11 @@ class MastClient:
         """The opaque session-resume credential, including any server rotation."""
         return self._user_token
 
+    @property
+    def company_id(self) -> str:
+        """The company ID currently in use."""
+        return self._company
+
     def _adopt_new_token(self, header_value: str | None) -> None:
         """Take over a renewed token the server sends in the `new-token` header.
 
@@ -120,7 +143,7 @@ class MastClient:
             "jwt": f"Bearer {self._token}",
             "X-CompanyId": self._company,
             "Origin": ORIGIN,
-            "Referer": f"{ORIGIN}/",
+            "Referer": f"{ORIGIN}/{self._company}/services",
             "User-Agent": "Mozilla/5.0 (compatible; HomeAssistant mast_water)",
         }
 
@@ -131,10 +154,16 @@ class MastClient:
         headers = self._headers()
         if resume:
             # The app's remembered-login credential works independently of the
-            # old JWT and company context. In particular, never attach an expired JWT
-            # or company ID to this global call.
+            # old JWT. In particular, never attach an expired JWT to this call.
             headers.pop("jwt", None)
-            headers.pop("X-CompanyId", None)
+        parsed_url = str(url).split("?")[0]
+        _LOGGER.debug(
+            "MAST API request: %s %s (company: %s, resume: %s)",
+            method,
+            parsed_url,
+            self._company,
+            resume,
+        )
         try:
             async with self._session.request(
                 method,
@@ -151,29 +180,70 @@ class MastClient:
                         # Error bodies and exception URLs may echo the query
                         # credential. Do not put them in logs or exceptions.
                         if status == 403 and error_reason(text) is None:
+                            _LOGGER.warning(
+                                "MAST API auth failure: %s %s -> HTTP 403 (session resume blocked)",
+                                method,
+                                parsed_url,
+                            )
                             raise MastApiError(
                                 "HTTP 403 (session resume blocked)", status
                             )
+                        _LOGGER.warning(
+                            "MAST API auth failure: %s %s -> HTTP %s (session resume rejected)",
+                            method,
+                            parsed_url,
+                            status,
+                        )
                         raise MastAuthError("MAST session resume rejected")
                     reason = error_reason(text)
                     if status == 403 and reason is None:
                         # A 403 without MAST's JSON error body (for example an HTML
                         # page from the CDN in front of the API) is a block, not an
                         # expired token, so do not ask the user to log in again.
+                        _LOGGER.warning(
+                            "MAST API auth failure: %s %s -> HTTP 403 (blocked, not a MAST error)",
+                            method,
+                            parsed_url,
+                        )
                         raise MastApiError(
                             "HTTP 403 (blocked, not a MAST error)", status
                         )
                     detail = f", reason: {reason}" if reason else ""
+                    _LOGGER.warning(
+                        "MAST API auth failure: %s %s -> HTTP %s%s",
+                        method,
+                        parsed_url,
+                        status,
+                        detail,
+                    )
+                    if reason and "company not valid" in reason.lower():
+                        raise MastCompanyError(f"HTTP {status}{detail}")
                     raise MastAuthError(f"HTTP {status}{detail}")
                 if status >= 300:
                     # The API answers bad card numbers / bad ranges with a
                     # generic 500 and a Hebrew message, so keep the status.
-                    if not resume:
-                        _LOGGER.debug("MAST API HTTP %s: %s", status, text[:200])
+                    _LOGGER.warning(
+                        "MAST API HTTP error: %s %s -> HTTP %s: %s",
+                        method,
+                        parsed_url,
+                        status,
+                        _sanitize_log_text(text, self._user_token),
+                    )
                     raise MastApiError(f"HTTP {status}", status)
+                _LOGGER.debug(
+                    "MAST API success: %s %s -> HTTP %s",
+                    method,
+                    parsed_url,
+                    status,
+                )
                 try:
                     payload = await resp.json(content_type=None)
                 except (aiohttp.ContentTypeError, ValueError):
+                    _LOGGER.warning(
+                        "MAST API response error: %s %s -> response was not JSON",
+                        method,
+                        parsed_url,
+                    )
                     raise MastApiError("response was not JSON") from None
                 candidate = resp.headers.get("new-token")
                 if resume:
@@ -181,19 +251,68 @@ class MastClient:
                         not isinstance(payload, dict)
                         or payload.get("isSuccess") is not True
                     ):
+                        _LOGGER.warning(
+                            "MAST API session resume rejected in payload: %s %s",
+                            method,
+                            parsed_url,
+                        )
                         raise MastAuthError("MAST session resume rejected")
                     expiry = token_expiry(clean_token(candidate or ""))
                     if expiry is None or expiry <= datetime.now(UTC):
+                        _LOGGER.warning(
+                            "MAST API session resume returned no valid JWT: %s %s",
+                            method,
+                            parsed_url,
+                        )
                         raise MastApiError("Session resume returned no valid JWT")
                     user = payload.get("user")
-                    returned = user.get("token") if isinstance(user, dict) else None
-                    if isinstance(returned, str) and returned.strip():
-                        self._user_token = returned.strip()
+                    if isinstance(user, dict):
+                        returned = user.get("token")
+                        if isinstance(returned, str) and returned.strip():
+                            self._user_token = returned.strip()
+                    companies = (
+                        payload.get("userCompanies")
+                        or payload.get("companies")
+                        or (
+                            user.get("userCompanies")
+                            if isinstance(user, dict)
+                            else None
+                        )
+                        or (user.get("companies") if isinstance(user, dict) else None)
+                    )
+                    if isinstance(companies, list) and companies:
+                        active = next(
+                            (
+                                c
+                                for c in companies
+                                if isinstance(c, dict) and c.get("isActiveCompany")
+                            ),
+                            companies[0],
+                        )
+                        cid = (
+                            active.get("companyId")
+                            if isinstance(active, dict)
+                            else None
+                        )
+                        if cid is not None:
+                            self._company = str(cid)
                 self._adopt_new_token(candidate)
                 return payload
         except (aiohttp.ClientError, TimeoutError) as err:
             if resume:
+                _LOGGER.warning(
+                    "MAST API connection error (resume): %s %s -> %s",
+                    method,
+                    parsed_url,
+                    err,
+                )
                 raise MastConnectionError("Cannot reach MAST session resume") from None
+            _LOGGER.warning(
+                "MAST API connection error: %s %s -> %s",
+                method,
+                parsed_url,
+                err,
+            )
             raise MastConnectionError(str(err)) from err
 
     async def async_resume_session(self) -> None:
@@ -214,20 +333,24 @@ class MastClient:
         as invalid. Request failures retain their own error type.
         """
         validation = await self._request("GET", self._validate_url)
-        await self._request("GET", self._cards_url)
+        await self.async_get_cards()
         return not (isinstance(validation, dict) and validation.get("isValid") is False)
 
     async def async_get_readings(self, date_from: date, date_to: date) -> list[Reading]:
         """Fetch cumulative daily readings for [date_from, date_to)."""
-        payload = await self._request(
-            "POST",
-            self._url,
-            json={
-                "waterCardNumber": self._card,
-                "dateFrom": date_from.isoformat(),
-                "dateTo": date_to.isoformat(),
-            },
-        )
+        body = {
+            "waterCardNumber": self._card,
+            "dateFrom": date_from.isoformat(),
+            "dateTo": date_to.isoformat(),
+        }
+        try:
+            payload = await self._request("POST", self._url, json=body)
+        except (MastApiError, MastAuthError):
+            alt_url = str(self._url).replace(
+                "WaterMeter/GetWaterMeterCardReading",
+                "PersonalAreaAsset/GetWaterMeterCardReading",
+            )
+            payload = await self._request("POST", alt_url, json=body)
         try:
             return parse_readings(payload)
         except ValueError as err:
@@ -235,7 +358,14 @@ class MastClient:
 
     async def async_get_cards(self) -> list[Card]:
         """List the water cards (meters) on the logged-in account."""
-        payload = await self._request("GET", self._cards_url)
+        try:
+            payload = await self._request("GET", self._cards_url)
+        except (MastApiError, MastAuthError):
+            alt_url = str(self._cards_url).replace(
+                "WaterMeter/GetWaterMeterCards",
+                "PersonalAreaAsset/GetPayerWaterCards",
+            )
+            payload = await self._request("GET", alt_url)
         try:
             return parse_cards(payload)
         except ValueError as err:

@@ -39,7 +39,8 @@
       "invalid_user_token": "MAST rejected the session token or it cannot access this water card.",
       "session_token_required": "Paste the session token.",
       "assets_invalid": "MAST says the account assets are not valid.",
-      "mast_error": "MAST returned an error. Try again."
+      "mast_error": "MAST returned an error. Try again.",
+      "invalid_company": "MAST does not accept this Company ID for your account. Use the X-CompanyId request header value, or the number in the site address mast.co.il/<id>/services."
     },
     "abort": {
       "already_configured": "This water card is already configured.",

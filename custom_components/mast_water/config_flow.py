@@ -20,7 +20,13 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.util import dt as dt_util
 
-from .api import MastApiError, MastAuthError, MastClient, MastConnectionError
+from .api import (
+    MastApiError,
+    MastAuthError,
+    MastClient,
+    MastCompanyError,
+    MastConnectionError,
+)
 from .const import (
     CONF_CARD,
     CONF_COMPANY_ID,
@@ -50,7 +56,11 @@ async def _resume_credentials(
         raise MastAssetsInvalidError
     if not any(item.number == card for item in await client.async_get_cards()):
         raise MastAuthError("The resumed session cannot access this water card")
-    return {CONF_TOKEN: client.token, CONF_USER_TOKEN: client.user_token}
+    return {
+        CONF_TOKEN: client.token,
+        CONF_USER_TOKEN: client.user_token,
+        CONF_COMPANY_ID: client.company_id,
+    }
 
 
 async def _validate(
@@ -64,6 +74,8 @@ async def _validate(
     today = dt_util.now().date()
     try:
         readings = await client.async_get_readings(today - timedelta(days=14), today)
+    except MastCompanyError:
+        return "invalid_company"
     except MastAuthError:
         return "invalid_auth"
     except MastConnectionError:
@@ -109,6 +121,8 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     await client.async_resume_session()
                     if not await client.async_restore_session():
                         errors["base"] = "assets_invalid"
+                except MastCompanyError:
+                    errors["base"] = "invalid_company"
                 except MastAuthError:
                     errors["base"] = "invalid_user_token"
                 except MastConnectionError:
@@ -119,6 +133,8 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     return self._show_user_form(errors)
                 try:
                     cards = await client.async_get_cards()
+                except MastCompanyError:
+                    errors["base"] = "invalid_company"
                 except MastAuthError:
                     errors["base"] = "invalid_auth"
                 except MastConnectionError:
@@ -128,7 +144,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 if not errors:
                     self._token = client.token
                     self._user_token = client.user_token
-                    self._company, self._cards = company, cards
+                    self._company, self._cards = client.company_id, cards
                     return await self.async_step_card()
         return self._show_user_form(errors)
 
