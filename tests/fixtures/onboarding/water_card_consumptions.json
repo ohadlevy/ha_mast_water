@@ -1,0 +1,14 @@
+[
+  {
+    "calculationId": 1,
+    "year": 2026,
+    "period": 1,
+    "personalUsage": 15.5,
+    "legacyUsage": 0.0,
+    "totalUsage": 15.5,
+    "consumptionDays": 59,
+    "waterPrice": 100.0,
+    "sewagPrice": 50.0,
+    "totalPrice": 150.0
+  }
+]

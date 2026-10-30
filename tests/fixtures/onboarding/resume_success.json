@@ -1,0 +1,6 @@
+{
+  "isSuccess": true,
+  "user": {
+    "token": "opaque-user-token"
+  }
+}

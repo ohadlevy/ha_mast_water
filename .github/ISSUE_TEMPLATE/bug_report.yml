@@ -11,28 +11,25 @@ body:
       placeholder: Describe the issue...
     validations:
       required: true
-  - type: textarea
-    id: reproduction
+  - type: input
+    id: corporation
     attributes:
-      label: To Reproduce
-      description: Steps to reproduce the behavior.
-      placeholder: |
-        1. Go to...
-        2. Click on...
-        3. Scroll down to...
+      label: Water Corporation / Tenant
+      description: Which water corporation or tenant ID are you using (e.g. Mei Raanana 110, Mei Sheva 12)?
+      placeholder: e.g. 12 (Mei Sheva)
     validations:
       required: false
   - type: textarea
     id: logs
     attributes:
-      label: Home Assistant Log Output
-      description: Please paste any relevant log output or traceback. Make sure to redact sensitive info!
+      label: Probe Output / Home Assistant Log Output & Server Responses
+      description: Please provide `mast_probe.py` output (or debug logs for `custom_components.mast_water`), ensuring sensitive tokens/credentials are redacted.
       placeholder: |
         <details>
-        <summary>Logs</summary>
+        <summary>Probe output & Logs</summary>
 
         ```text
-        Paste logs here...
+        Paste probe output or logs here...
         ```
 
         </details>

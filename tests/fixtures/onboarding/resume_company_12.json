@@ -1,0 +1,9 @@
+{
+  "isSuccess": true,
+  "user": {
+    "token": "rotated-credential",
+    "userCompanies": [
+      {"companyId": 12, "isActiveCompany": true, "companyName": "Mei Sheva"}
+    ]
+  }
+}
