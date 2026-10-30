@@ -116,7 +116,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 except MastApiError:
                     errors["base"] = "mast_error"
                 if errors:
-                    return self._show_user_form(errors)
+                    return await self._show_user_form(errors)
                 try:
                     cards = await client.async_get_cards()
                 except MastAuthError:
@@ -130,15 +130,54 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._user_token = client.user_token
                     self._company, self._cards = company, cards
                     return await self.async_step_card()
-        return self._show_user_form(errors)
+        return await self._show_user_form(errors)
 
-    def _show_user_form(self, errors: dict[str, str]) -> ConfigFlowResult:
+    async def _show_user_form(self, errors: dict[str, str]) -> ConfigFlowResult:
+        client = MastClient(
+            async_get_clientsession(self.hass),
+            "",
+            "",
+            DEFAULT_COMPANY_ID,
+        )
+        options: list[SelectOptionDict] = []
+        try:
+            raw_cities = await client.async_get_cities()
+            for item in raw_cities:
+                cid = item.get("companyId")
+                name = item.get("name")
+                if cid is not None and name:
+                    translation = item.get("nameTranslation") or {}
+                    en_name = translation.get("en", "").strip()
+                    if en_name and en_name != name:
+                        label = f"{name} / {en_name} ({cid})"
+                    else:
+                        label = f"{name} ({cid})"
+                    options.append(
+                        SelectOptionDict(value=str(cid), label=label)
+                    )
+            options.sort(key=lambda o: o["label"])
+        except Exception:
+            pass
+
+        if not options:
+            options = [
+                SelectOptionDict(
+                    value=DEFAULT_COMPANY_ID, label=f"מי רעננה (Mei Raanana) ({DEFAULT_COMPANY_ID})"
+                )
+            ]
+
+        company_selector = SelectSelector(
+            SelectSelectorConfig(
+                options=options,
+            )
+        )
+
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_USER_TOKEN): USER_TOKEN_SELECTOR,
-                    vol.Required(CONF_COMPANY_ID, default=DEFAULT_COMPANY_ID): str,
+                    vol.Required(CONF_COMPANY_ID, default=DEFAULT_COMPANY_ID): company_selector,
                 }
             ),
             errors=errors,

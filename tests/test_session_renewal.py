@@ -21,7 +21,8 @@ from custom_components.mast_water.api import (
     MastClient,
     MastConnectionError,
 )
-from custom_components.mast_water.const import CONF_TOKEN, CONF_USER_TOKEN, DOMAIN
+from custom_components.mast_water.const import CONF_COMPANY_ID, CONF_TOKEN, CONF_USER_TOKEN, DOMAIN
+import voluptuous as vol
 
 from .test_integration import (
     API,
@@ -581,3 +582,54 @@ async def test_reauth_flow_translation_rendering(hass, recorder_mock, hass_stora
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     reauth_flow = next(f for f in flows if f["step_id"] == "reauth_confirm")
     assert reauth_flow["step_id"] == "reauth_confirm"
+
+
+async def test_async_get_cities_and_translations(socket_enabled):
+    async def cities(request):
+        return web.json_response({
+            "companyDetailsMediaList": [
+                {
+                    "companyId": 110,
+                    "name": "מי רעננה",
+                    "nameTranslation": {"he": "מי רעננה", "en": "Mei Raanana"}
+                }
+            ]
+        })
+
+    app = web.Application()
+    app.router.add_get("/Cities/GetCities", cities)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        client = MastClient(
+            session,
+            "",
+            CARD,
+            "110",
+            cities_url=str(server.make_url("/Cities/GetCities")),
+        )
+        res = await client.async_get_cities()
+        assert len(res) == 1
+        assert res[0]["companyId"] == 110
+        assert res[0]["nameTranslation"]["en"] == "Mei Raanana"
+
+
+async def test_user_flow_populates_city_selector_with_translations(hass):
+    cities_payload = {
+        "companyDetailsMediaList": [
+            {
+                "companyId": 110,
+                "name": "מי רעננה",
+                "nameTranslation": {"he": "מי רעננה", "en": "Mei Raanana"}
+            }
+        ]
+    }
+    with patch(f"{API}.async_get_cities", AsyncMock(return_value=cities_payload["companyDetailsMediaList"])):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
+    schema = result["data_schema"].schema
+    selector = schema[vol.Required(CONF_COMPANY_ID)]
+    # Check that selector options were populated with translated label
+    options = selector.config["options"]
+    assert any("Mei Raanana" in opt["label"] for opt in options)
