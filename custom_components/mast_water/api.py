@@ -71,7 +71,7 @@ def _sanitize_log_text(text: str, secret: str = "") -> str:
     """Remove or redact sensitive credentials from text before logging."""
     if not text:
         return ""
-    sanitized = text[:200]
+    sanitized = text
     if secret:
         sanitized = sanitized.replace(secret, "[REDACTED]")
     return sanitized
@@ -209,12 +209,15 @@ class MastClient:
                             "HTTP 403 (blocked, not a MAST error)", status
                         )
                     detail = f", reason: {reason}" if reason else ""
+                    body_snippet = _sanitize_log_text(text, self._user_token)
+                    body_info = f", body: {body_snippet}" if body_snippet else ""
                     _LOGGER.warning(
-                        "MAST API auth failure: %s %s -> HTTP %s%s",
+                        "MAST API auth failure: %s %s -> HTTP %s%s%s",
                         method,
                         parsed_url,
                         status,
                         detail,
+                        body_info,
                     )
                     if reason and "company not valid" in reason.lower():
                         raise MastCompanyError(f"HTTP {status}{detail}")
@@ -294,8 +297,8 @@ class MastClient:
                             if isinstance(active, dict)
                             else None
                         )
-                        if cid is not None:
-                            self._company = str(cid)
+                        if cid is not None and str(cid).strip() and str(cid).strip() != "0":
+                            self._company = str(cid).strip()
                 self._adopt_new_token(candidate)
                 return payload
         except (aiohttp.ClientError, TimeoutError) as err:
@@ -345,7 +348,7 @@ class MastClient:
         }
         try:
             payload = await self._request("POST", self._url, json=body)
-        except (MastApiError, MastAuthError):
+        except MastCompanyError:
             alt_url = str(self._url).replace(
                 "WaterMeter/GetWaterMeterCardReading",
                 "PersonalAreaAsset/GetWaterMeterCardReading",
@@ -360,7 +363,7 @@ class MastClient:
         """List the water cards (meters) on the logged-in account."""
         try:
             payload = await self._request("GET", self._cards_url)
-        except (MastApiError, MastAuthError):
+        except MastCompanyError:
             alt_url = str(self._cards_url).replace(
                 "WaterMeter/GetWaterMeterCards",
                 "PersonalAreaAsset/GetPayerWaterCards",

@@ -614,3 +614,45 @@ async def test_reauth_flow_translation_rendering(hass, recorder_mock, hass_stora
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     reauth_flow = next(f for f in flows if f["step_id"] == "reauth_confirm")
     assert reauth_flow["step_id"] == "reauth_confirm"
+
+
+async def test_async_get_cards_and_readings_fallbacks(socket_enabled):
+    from datetime import date
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from custom_components.mast_water.api import MastClient
+
+    async def cards_401(request):
+        return web.json_response({"reason": "Company Not valid"}, status=401)
+
+    async def payer_cards_200(request):
+        return web.json_response([{"waterCardNumber": "12345", "address": "Test St"}])
+
+    async def readings_401(request):
+        return web.json_response({"reason": "Company Not valid"}, status=401)
+
+    async def payer_readings_200(request):
+        return web.json_response([{"readingDate": "2026-10-01T00:00:00", "reading": 100.0}])
+
+    app = web.Application()
+    app.router.add_get("/WaterMeter/GetWaterMeterCards", cards_401)
+    app.router.add_get("/PersonalAreaAsset/GetPayerWaterCards", payer_cards_200)
+    app.router.add_post("/WaterMeter/GetWaterMeterCardReading", readings_401)
+    app.router.add_post("/PersonalAreaAsset/GetWaterMeterCardReading", payer_readings_200)
+
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        client = MastClient(
+            session,
+            token=mk_token(48),
+            card_number="12345",
+            company_id="12",
+            url=str(server.make_url("/WaterMeter/GetWaterMeterCardReading")),
+            cards_url=str(server.make_url("/WaterMeter/GetWaterMeterCards")),
+        )
+        cards = await client.async_get_cards()
+        assert len(cards) == 1
+        assert cards[0].number == "12345"
+
+        readings = await client.async_get_readings(date(2026, 10, 1), date(2026, 10, 2))
+        assert len(readings) == 1
+        assert readings[0].value == 100.0

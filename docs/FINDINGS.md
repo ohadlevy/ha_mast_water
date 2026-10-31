@@ -177,3 +177,12 @@ initial page capture did not include.
 3. Decode only the timestamps of the JWT to learn its lifetime.
 4. Change `X-CompanyId` to the other company's id (visible in request headers and in URLs such as
    `https://www.mast.co.il/<id>/services`).
+
+## Collecting Server Responses for Test Fixtures
+
+When users fail to get the integration started (onboarding adoption issues), collect their failing API responses to turn into regression test fixtures:
+1. Ask the user to enable debug logging (`logger: default: info logs: custom_components.mast_water: debug`) in Home Assistant.
+2. Have them attempt setup and export Home Assistant diagnostics or paste the debug logs showing status codes and raw response bodies.
+3. Sanitize the payload by replacing tokens, card numbers, and PII with placeholders (e.g. `mk_jwt()` or dummy IDs).
+4. Save the sanitized JSON response into `tests/fixtures/onboarding/` or `tests/fixtures/runtime/`.
+5. Add a regression test in `tests/test_config_flow.py` or `tests/test_integration.py` loading the new fixture to ensure the adoption failure is fixed and protected against future regressions.

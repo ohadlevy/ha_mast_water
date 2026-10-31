@@ -1,0 +1,10 @@
+{
+  "isSuccess": true,
+  "user": {
+    "token": "rotated-credential",
+    "userCompanies": [
+      {"companyId": 110, "isActiveCompany": false},
+      {"companyId": 12, "isActiveCompany": true}
+    ]
+  }
+}

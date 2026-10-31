@@ -8,6 +8,8 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
+from pathlib import Path
+
 from custom_components.mast_water.const import (
     API_BASE,
     CARDS_URL,
@@ -17,6 +19,12 @@ from custom_components.mast_water.const import (
     RESUME_URL,
     VALIDATE_URL,
 )
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "onboarding"
+
+
+def load_fixture(filename: str) -> dict:
+    return json.loads((FIXTURES_DIR / filename).read_text())
 
 
 def mk_jwt(hours: float = 48) -> str:
@@ -49,15 +57,15 @@ async def test_wrong_company_id_is_reported_as_invalid_company(
     """
     aioclient_mock.get(
         RESUME_URL,
-        json={"isSuccess": True, "user": {"token": "opaque-user-token"}},
+        json=load_fixture("resume_success.json"),
         headers={"new-token": mk_jwt()},
     )
-    aioclient_mock.get(VALIDATE_URL, json={"isValid": True})
-    aioclient_mock.get(CARDS_URL, status=401, json={"reason": "Company Not valid"})
+    aioclient_mock.get(VALIDATE_URL, json=load_fixture("validate_success.json"))
+    aioclient_mock.get(CARDS_URL, status=401, json=load_fixture("company_not_valid_401.json"))
     aioclient_mock.get(
         API_BASE + "PersonalAreaAsset/GetPayerWaterCards",
         status=401,
-        json={"reason": "Company Not valid"},
+        json=load_fixture("company_not_valid_401.json"),
     )
     result = await run_flow(hass, company="12")
     assert result["type"] is FlowResultType.FORM

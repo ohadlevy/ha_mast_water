@@ -25,14 +25,14 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Home Assistant Log Output
-      description: Please paste any relevant log output or traceback. Make sure to redact sensitive info!
+      label: Home Assistant Log Output & Server Responses
+      description: Please enable debug logging for `custom_components.mast_water`, reproduce the issue, and paste relevant log output, status codes, or response JSON bodies (make sure to redact sensitive tokens/credentials!).
       placeholder: |
         <details>
-        <summary>Logs</summary>
+        <summary>Logs & API Responses</summary>
 
         ```text
-        Paste logs here...
+        Paste debug logs or server responses here...
         ```
 
         </details>
