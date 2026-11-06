@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, tzinfo
 from typing import Any
 
@@ -23,6 +23,27 @@ class Card:
 
     number: str
     address: str
+
+
+@dataclass(frozen=True)
+class BillingPeriod:
+    """One billed period from GetWaterCardConsumptions.
+
+    ``end`` is the date of the closing meter reading (``lastReading``). Billing
+    periods follow the water corporation's own calendar, not calendar months.
+    ``shared_usage`` is the building's shared consumption allocated to this home.
+    """
+
+    end: date
+    year: int | None
+    period: int | None
+    days: int | None
+    private_usage: float | None
+    shared_usage: float | None
+    total_usage: float | None
+    water_price: float | None
+    sewage_price: float | None
+    total_price: float | None
 
 
 @dataclass(frozen=True)
@@ -90,6 +111,94 @@ def parse_readings(payload: Any) -> list[Reading]:
         except (KeyError, TypeError, ValueError):
             continue  # skip malformed entries
     return [Reading(d, v) for d, v in sorted(by_day.items())]
+
+
+def _number(value: Any) -> float | None:
+    """A finite number, or None for anything else (including bools)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _whole(value: Any) -> int | None:
+    number = _number(value)
+    return None if number is None else int(number)
+
+
+def _day(value: Any) -> date | None:
+    """Parse an ISO timestamp or a dd/mm/yyyy date into a day."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        pass
+    date_part = text.replace("T", " ").split(" ")[0]
+    try:
+        return datetime.strptime(date_part, "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+
+def parse_billing_periods(payload: Any) -> list[BillingPeriod]:
+    """Parse GetWaterCardConsumptions into billed periods, oldest first.
+
+    Entries without a usable closing-reading date are skipped, because the date
+    is what places a period on the timeline.
+    """
+    if not isinstance(payload, list):
+        raise TypeError("expected a list of billing periods")
+    periods: dict[date, BillingPeriod] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        end = _day(item.get("lastReading"))
+        if end is None:
+            continue
+        periods[end] = BillingPeriod(
+            end=end,
+            year=_whole(item.get("year")),
+            period=_whole(item.get("period")),
+            days=_whole(item.get("consumptionDays")),
+            private_usage=_number(item.get("personalUsage")),
+            shared_usage=_number(item.get("legacyUsage")),
+            total_usage=_number(item.get("totalUsage")),
+            water_price=_number(item.get("waterPrice")),
+            sewage_price=_number(item.get("sewagPrice")),
+            total_price=_number(item.get("totalPrice")),
+        )
+    return [periods[end] for end in sorted(periods)]
+
+
+def billing_to_dict(period: BillingPeriod) -> dict[str, Any]:
+    """Serialise a billed period for storage (JSON-safe)."""
+    return {**asdict(period), "end": period.end.isoformat()}
+
+
+def billing_from_dict(data: Any) -> BillingPeriod | None:
+    """Rebuild a stored billed period; None if the stored entry is unusable."""
+    if not isinstance(data, dict):
+        return None
+    end = _day(data.get("end"))
+    if end is None:
+        return None
+    return BillingPeriod(
+        end=end,
+        year=_whole(data.get("year")),
+        period=_whole(data.get("period")),
+        days=_whole(data.get("days")),
+        private_usage=_number(data.get("private_usage")),
+        shared_usage=_number(data.get("shared_usage")),
+        total_usage=_number(data.get("total_usage")),
+        water_price=_number(data.get("water_price")),
+        sewage_price=_number(data.get("sewage_price")),
+        total_price=_number(data.get("total_price")),
+    )
 
 
 def build_rows(
