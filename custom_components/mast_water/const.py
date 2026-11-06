@@ -8,6 +8,7 @@ API_BASE = "https://api.mast.co.il/mast/api/"
 API_URL = API_BASE + "WaterMeter/GetWaterMeterCardReading"
 CARDS_URL = API_BASE + "WaterMeter/GetWaterMeterCards"
 VALIDATE_URL = API_BASE + "PersonalAreaAsset/ValidateUserAssets"
+BILLING_URL = API_BASE + "PersonalAreaAsset/GetWaterCardConsumptions"
 RESUME_URL = API_BASE + "Users/GetUserByToken"
 ORIGIN = "https://www.mast.co.il"
 
