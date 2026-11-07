@@ -110,7 +110,9 @@ def test_parse_rejects_a_non_list():
 
 
 def _state(hass: HomeAssistant, key: str):
-    entity_id = er.async_get(hass).async_get_entity_id("sensor", DOMAIN, f"{CARD}_{key}")
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{CARD}_{key}"
+    )
     assert entity_id is not None, key
     return hass.states.get(entity_id)
 
