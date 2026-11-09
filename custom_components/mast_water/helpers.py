@@ -23,6 +23,7 @@ class Card:
 
     number: str
     address: str
+    source: str = "watermeter"
 
 
 @dataclass(frozen=True)
@@ -63,10 +64,10 @@ def token_issued(token: str) -> datetime | None:
     return _claim_time(token, "iat")
 
 
-def parse_cards(payload: Any) -> list[Card]:
+def parse_cards(payload: Any, source: str = "watermeter") -> list[Card]:
     """Parse GetWaterMeterCards into cards, skipping malformed entries."""
     if not isinstance(payload, list):
-        raise TypeError("expected a list of cards")
+        raise ValueError("expected a list of cards")  # noqa: TRY004
     cards: list[Card] = []
     for item in payload:
         try:
@@ -74,14 +75,14 @@ def parse_cards(payload: Any) -> list[Card]:
         except (KeyError, TypeError):
             continue
         if number:
-            cards.append(Card(number, str(item.get("address") or "").strip()))
+            cards.append(Card(number, str(item.get("address") or "").strip(), source))
     return cards
 
 
 def parse_readings(payload: Any) -> list[Reading]:
     """Parse the API response into sorted, de-duplicated daily readings."""
     if not isinstance(payload, list):
-        raise TypeError("expected a list of readings")
+        raise ValueError("expected a list of readings")  # noqa: TRY004
     by_day: dict[date, float] = {}
     for item in payload:
         try:

@@ -26,8 +26,10 @@ from .const import (
     AUTH_STRIKES,
     BACKFILL_DAYS,
     CHUNK_DAYS,
+    CONF_COMPANY_ID,
     CONF_TOKEN,
     CONF_USER_TOKEN,
+    DEFAULT_COMPANY_ID,
     DOMAIN,
     SMALL_CHUNK_DAYS,
     STATISTICS_REPAIR_VERSION,
@@ -143,8 +145,16 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         entry = self.config_entry
         current = self._client.token
         user_token = self._client.user_token
+        company_id = self._client.company_id
         changed = current != entry.data.get(CONF_TOKEN)
-        if not changed and user_token == entry.data.get(CONF_USER_TOKEN, ""):
+        company_changed = company_id != entry.data.get(
+            CONF_COMPANY_ID, DEFAULT_COMPANY_ID
+        )
+        if (
+            not changed
+            and user_token == entry.data.get(CONF_USER_TOKEN, "")
+            and not company_changed
+        ):
             return
         self._expiry = token_expiry(current)
         if changed:
@@ -152,9 +162,13 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         data = {**entry.data, CONF_TOKEN: current}
         if user_token:
             data[CONF_USER_TOKEN] = user_token
+        if company_id:
+            data[CONF_COMPANY_ID] = company_id
         self.hass.config_entries.async_update_entry(entry, data=data)
         if changed:
             _LOGGER.info("MAST renewed the session token (expires %s)", self._expiry)
+        if company_changed:
+            _LOGGER.info("MAST updated company ID to %s", company_id)
 
     async def _resume_session(self) -> None:
         """Remember rejected credentials so a valid JWT can keep working quietly."""

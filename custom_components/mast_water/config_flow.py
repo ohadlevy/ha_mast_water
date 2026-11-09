@@ -20,7 +20,13 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.util import dt as dt_util
 
-from .api import MastApiError, MastAuthError, MastClient, MastConnectionError
+from .api import (
+    MastApiError,
+    MastAuthError,
+    MastClient,
+    MastCompanyError,
+    MastConnectionError,
+)
 from .const import (
     CONF_CARD,
     CONF_COMPANY_ID,
@@ -48,9 +54,14 @@ async def _resume_credentials(
     await client.async_resume_session()
     if not await client.async_restore_session():
         raise MastAssetsInvalidError
-    if not any(item.number == card for item in await client.async_get_cards()):
+    cards = await client.async_get_cards()
+    if not any(item.number == card for item in cards):
         raise MastAuthError("The resumed session cannot access this water card")
-    return {CONF_TOKEN: client.token, CONF_USER_TOKEN: client.user_token}
+    return {
+        CONF_TOKEN: client.token,
+        CONF_USER_TOKEN: client.user_token,
+        CONF_COMPANY_ID: client.company_id,
+    }
 
 
 async def _validate(
@@ -64,6 +75,8 @@ async def _validate(
     today = dt_util.now().date()
     try:
         readings = await client.async_get_readings(today - timedelta(days=14), today)
+    except MastCompanyError:
+        return "invalid_company"
     except MastAuthError:
         return "invalid_auth"
     except MastConnectionError:
@@ -86,13 +99,13 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
         self._user_token = ""
         self._company = DEFAULT_COMPANY_ID
         self._cards: list[Card] = []
+        self._companies: list[dict[str, Any]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            company = user_input[CONF_COMPANY_ID].strip()
             user_token = user_input.get(CONF_USER_TOKEN, "").strip()
             if not user_token:
                 errors["base"] = "session_token_required"
@@ -101,14 +114,32 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     async_get_clientsession(self.hass),
                     "",
                     "",
-                    company,
+                    DEFAULT_COMPANY_ID,
                     user_token=user_token,
                 )
                 cards: list[Card] = []
                 try:
                     await client.async_resume_session()
+                    if (
+                        client.companies
+                        and len(client.companies) > 1
+                        and not any(
+                            c.get("isActiveCompany")
+                            for c in client.companies
+                            if isinstance(c, dict)
+                        )
+                    ):
+                        self._token = client.token
+                        self._user_token = client.user_token
+                        self._companies = client.companies
+                        return await self.async_step_company()
                     if not await client.async_restore_session():
                         errors["base"] = "assets_invalid"
+                except MastCompanyError:
+                    return self.async_abort(
+                        reason="no_daily_readings",
+                        description_placeholders={"company": client.company_id},
+                    )
                 except MastAuthError:
                     errors["base"] = "invalid_user_token"
                 except MastConnectionError:
@@ -119,6 +150,16 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     return self._show_user_form(errors)
                 try:
                     cards = await client.async_get_cards()
+                    if any(c.source == "payer" for c in cards):
+                        return self.async_abort(
+                            reason="no_daily_readings",
+                            description_placeholders={"company": client.company_id},
+                        )
+                except MastCompanyError:
+                    return self.async_abort(
+                        reason="no_daily_readings",
+                        description_placeholders={"company": client.company_id},
+                    )
                 except MastAuthError:
                     errors["base"] = "invalid_auth"
                 except MastConnectionError:
@@ -128,7 +169,8 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 if not errors:
                     self._token = client.token
                     self._user_token = client.user_token
-                    self._company, self._cards = company, cards
+                    self._company = client.company_id
+                    self._cards = cards
                     return await self.async_step_card()
         return self._show_user_form(errors)
 
@@ -138,11 +180,88 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_USER_TOKEN): USER_TOKEN_SELECTOR,
-                    vol.Required(CONF_COMPANY_ID, default=DEFAULT_COMPANY_ID): str,
                 }
             ),
             errors=errors,
             description_placeholders={"mast_url": "https://mast.co.il"},
+        )
+
+    async def async_step_company(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            company = str(user_input[CONF_COMPANY_ID]).strip()
+            client = MastClient(
+                async_get_clientsession(self.hass),
+                self._token,
+                "",
+                company,
+                user_token=self._user_token,
+            )
+            cards: list[Card] = []
+            try:
+                if not await client.async_restore_session():
+                    errors["base"] = "assets_invalid"
+            except MastCompanyError:
+                return self.async_abort(
+                    reason="no_daily_readings",
+                    description_placeholders={"company": company},
+                )
+            except MastAuthError:
+                errors["base"] = "invalid_user_token"
+            except MastConnectionError:
+                errors["base"] = "cannot_connect"
+            except MastApiError:
+                errors["base"] = "mast_error"
+            if errors:
+                pass
+            else:
+                try:
+                    cards = await client.async_get_cards()
+                    if any(c.source == "payer" for c in cards):
+                        return self.async_abort(
+                            reason="no_daily_readings",
+                            description_placeholders={"company": company},
+                        )
+                except MastCompanyError:
+                    return self.async_abort(
+                        reason="no_daily_readings",
+                        description_placeholders={"company": company},
+                    )
+                except MastAuthError:
+                    errors["base"] = "invalid_auth"
+                except MastConnectionError:
+                    errors["base"] = "cannot_connect"
+                except MastApiError:
+                    cards = []
+            if not errors:
+                self._token = client.token
+                self._user_token = client.user_token
+                self._company = client.company_id
+                self._cards = cards
+                return await self.async_step_card()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_COMPANY_ID): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=str(c.get("companyId")),
+                                label=str(c.get("companyName") or c.get("companyId")),
+                            )
+                            for c in self._companies
+                            if isinstance(c, dict) and c.get("companyId") is not None
+                        ]
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="company",
+            data_schema=schema,
+            errors=errors,
         )
 
     async def async_step_card(
@@ -263,7 +382,10 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     self.hass,
                     entry.data[CONF_CARD],
                     updates[CONF_TOKEN],
-                    entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+                    updates.get(
+                        CONF_COMPANY_ID,
+                        entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
+                    ),
                 )
             ):
                 errors["base"] = error

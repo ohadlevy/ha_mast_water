@@ -4,6 +4,8 @@ Imports your daily water meter readings from the **MAST** resident portal (used 
 Israeli water corporations) into Home Assistant, including a backfill of your history, so the data works in
 the **Energy dashboard** and in long-term statistics.
 
+> **Supported Corporations:** Water corporations offering daily meter readings (such as Mei Raanana, tenant 110). Billing-only corporations (such as Mei Sheva / Be'er Sheva, tenant 12) provide billing-period consumption only and are not supported for daily readings.
+
 > **Unofficial.** It calls the same API the MAST web app uses, with your own session token, for your own data.
 > MAST can change or block that at any time. Not affiliated with MAST or Mei Raanana. What is known about the
 > API and why the integration works the way it does is in [docs/FINDINGS.md](docs/FINDINGS.md).
@@ -102,6 +104,7 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 
 | Symptom | Likely cause |
 |---|---|
+| "Your water corporation (...) provides billing-period consumption only" | The water corporation tenant provides billing-period data only, without daily meter readings. |
 | "MAST returned an error" when adding | Wrong card, a MAST backend problem, or unavailable meter data. HTTP 500 is generic and does not prove the token is invalid. |
 | Re-authentication prompt every 2 days | Only a JWT is configured, or MAST rejected the session token. Add it through Reconfigure. |
 | "MAST says the account assets are not valid" | MAST explicitly rejected the account's water assets during session restore; check the account and water access on the website. |
@@ -110,7 +113,7 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 | Log: `MAST refused a token that has not expired (...); restored the session, trying again` | Normal. MAST had dropped its session state and the integration repaired it. |
 | Log: `... retrying in 30 minutes (n/3)` | MAST still refused after the repair. After three tries in a row you are asked to log in again. |
 
-For more detail, add this to `configuration.yaml`:
+For diagnostics, use `scripts/mast_probe.py` to test endpoints and save sanitized fixtures, or `scripts/har_summary.py` to inspect a browser HAR file securely.
 
 ```yaml
 logger:

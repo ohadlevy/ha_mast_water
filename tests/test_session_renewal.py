@@ -83,6 +83,39 @@ async def test_resume_exchanges_opaque_token_without_old_jwt(socket_enabled, old
         assert client.user_token == "rotated-credential"
 
 
+async def test_resume_extracts_company_id_from_user_companies(socket_enabled):
+    renewed = mk_token(48)
+
+    async def resume(request):
+        return web.json_response(
+            {
+                "isSuccess": True,
+                "user": {
+                    "token": "rotated-credential",
+                    "userCompanies": [
+                        {"companyId": 110, "isActiveCompany": False},
+                        {"companyId": 12, "isActiveCompany": True},
+                    ],
+                },
+            },
+            headers={"new-token": "Bearer " + renewed},
+        )
+
+    app = web.Application()
+    app.router.add_get("/resume", resume)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        client = MastClient(
+            session,
+            "",
+            CARD,
+            "110",
+            user_token="remembered-credential",
+            resume_url=str(server.make_url("/resume")),
+        )
+        await client.async_resume_session()
+        assert client.company_id == "12"
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -285,7 +318,7 @@ async def test_initial_flow_accepts_resume_credential_without_valid_jwt(
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": SOURCE_USER}
         )
-        user_input = {CONF_USER_TOKEN: "remembered-credential", "company_id": "110"}
+        user_input = {CONF_USER_TOKEN: "remembered-credential"}
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input
         )
@@ -304,7 +337,7 @@ async def test_setup_form_requires_only_session_token(hass):
     assert CONF_USER_TOKEN in fields
     assert CONF_TOKEN not in fields
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_USER_TOKEN: "", "company_id": "110"}
+        result["flow_id"], {CONF_USER_TOKEN: ""}
     )
     assert result["errors"] == {"base": "session_token_required"}
 
@@ -323,7 +356,7 @@ async def test_setup_keeps_multiple_card_picker(hass):
             DOMAIN, context={"source": SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_USER_TOKEN: "credential", "company_id": "110"}
+            result["flow_id"], {CONF_USER_TOKEN: "credential"}
         )
         assert result["step_id"] == "card"
         result = await hass.config_entries.flow.async_configure(
@@ -360,7 +393,7 @@ async def test_setup_reports_resume_and_restore_failures(
             DOMAIN, context={"source": SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_USER_TOKEN: "credential", "company_id": "110"}
+            result["flow_id"], {CONF_USER_TOKEN: "credential"}
         )
     assert result["errors"] == {"base": expected}
 
