@@ -9,11 +9,13 @@ from typing import Any
 
 import aiohttp
 
-from .const import API_URL, CARDS_URL, ORIGIN, RESUME_URL, VALIDATE_URL
+from .const import API_URL, BILLING_URL, CARDS_URL, ORIGIN, RESUME_URL, VALIDATE_URL
 from .helpers import (
+    BillingPeriod,
     Card,
     Reading,
     clean_token,
+    parse_billing_periods,
     parse_cards,
     parse_readings,
     token_expiry,
@@ -94,7 +96,9 @@ class MastClient:
         *,
         user_token: str = "",
         resume_url: str = RESUME_URL,
+        billing_url: str = BILLING_URL,
     ) -> None:
+        self._billing_url = billing_url
         self._session = session
         self._token = token
         self._card = card_number
@@ -412,6 +416,20 @@ class MastClient:
         try:
             return parse_readings(payload)
         except ValueError as err:
+            raise MastApiError(f"unexpected response: {err}") from err
+
+    async def async_get_billing_periods(self) -> list[BillingPeriod]:
+        """Fetch the billed periods of the card, oldest first.
+
+        This is the table the MAST web app shows under the water card: one row per
+        billing period with private and shared consumption, days and cost.
+        """
+        payload = await self._request(
+            "GET", self._billing_url, params={"waterCard": self._card}
+        )
+        try:
+            return parse_billing_periods(payload)
+        except (TypeError, ValueError) as err:
             raise MastApiError(f"unexpected response: {err}") from err
 
     async def async_get_cards(self) -> list[Card]:

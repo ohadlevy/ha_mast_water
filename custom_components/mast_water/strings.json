@@ -63,6 +63,18 @@
       "daily_usage": {
         "name": "Latest daily usage"
       },
+      "billing_period_end": {
+        "name": "Last billing period end"
+      },
+      "billing_private_usage": {
+        "name": "Last billing period private usage"
+      },
+      "billing_shared_usage": {
+        "name": "Last billing period shared usage"
+      },
+      "billing_total_price": {
+        "name": "Last billing period amount before VAT"
+      },
       "token_expiry": {
         "name": "Access token expires"
       }

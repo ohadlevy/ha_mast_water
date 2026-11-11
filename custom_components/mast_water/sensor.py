@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -28,7 +28,7 @@ from .coordinator import MastCoordinator, MastData
 
 @dataclass(frozen=True, kw_only=True)
 class MastSensorDescription(SensorEntityDescription):
-    value_fn: Callable[[MastData], float | datetime | None]
+    value_fn: Callable[[MastData], float | date | datetime | None]
 
 
 SENSORS: tuple[MastSensorDescription, ...] = (
@@ -47,6 +47,38 @@ SENSORS: tuple[MastSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         suggested_display_precision=3,
         value_fn=lambda d: d.daily_usage,
+    ),
+    # Latest billed period (MAST's GetWaterCardConsumptions). The date is the closing
+    # meter reading, i.e. where the next billing period starts.
+    MastSensorDescription(
+        key="billing_period_end",
+        translation_key="billing_period_end",
+        device_class=SensorDeviceClass.DATE,
+        value_fn=lambda d: d.billing.end if d.billing else None,
+    ),
+    MastSensorDescription(
+        key="billing_private_usage",
+        translation_key="billing_private_usage",
+        device_class=SensorDeviceClass.WATER,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        suggested_display_precision=3,
+        value_fn=lambda d: d.billing.private_usage if d.billing else None,
+    ),
+    MastSensorDescription(
+        key="billing_shared_usage",
+        translation_key="billing_shared_usage",
+        device_class=SensorDeviceClass.WATER,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        suggested_display_precision=3,
+        value_fn=lambda d: d.billing.shared_usage if d.billing else None,
+    ),
+    MastSensorDescription(
+        key="billing_total_price",
+        translation_key="billing_total_price",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement="ILS",
+        suggested_display_precision=2,
+        value_fn=lambda d: d.billing.total_price if d.billing else None,
     ),
     MastSensorDescription(
         key="token_expiry",
@@ -71,6 +103,8 @@ class MastSensor(CoordinatorEntity[MastCoordinator], SensorEntity):
     """A MAST sensor."""
 
     _attr_has_entity_name = True
+    # The history list is for charts and cards; no need to store it in the database.
+    _unrecorded_attributes = frozenset({"history"})
     entity_description: MastSensorDescription
 
     def __init__(
@@ -93,14 +127,41 @@ class MastSensor(CoordinatorEntity[MastCoordinator], SensorEntity):
         """Keep the token sensor visible while polls fail: that is when it is needed."""
         if self.entity_description.key == "token_expiry":
             return self.coordinator.data is not None
+        if self.entity_description.key.startswith("billing_"):
+            data = self.coordinator.data
+            return super().available and data is not None and data.billing is not None
         return super().available
 
     @property
     def extra_state_attributes(self) -> dict[str, object] | None:
-        """For the token sensor: when it was issued and how often MAST renewed it."""
-        if self.entity_description.key != "token_expiry":
-            return None
+        """Token sensor: issue time and renewals. Billing end: period details."""
+        key = self.entity_description.key
         data = self.coordinator.data
+        if key == "billing_period_end":
+            period = data.billing if data else None
+            if period is None:
+                return None
+            return {
+                "year": period.year,
+                "period": period.period,
+                "days": period.days,
+                "total_usage": period.total_usage,
+                "water_price": period.water_price,
+                "sewage_price": period.sewage_price,
+                # Every billed period, oldest first, e.g. for a bar chart.
+                "history": [
+                    {
+                        "end": p.end.isoformat(),
+                        "days": p.days,
+                        "private_usage": p.private_usage,
+                        "shared_usage": p.shared_usage,
+                        "total_price": p.total_price,
+                    }
+                    for p in data.billing_history
+                ],
+            }
+        if key != "token_expiry":
+            return None
         return {
             "issued": data.token_issued.isoformat() if data.token_issued else None,
             "renewals_since_start": data.renewals,
@@ -109,5 +170,5 @@ class MastSensor(CoordinatorEntity[MastCoordinator], SensorEntity):
         }
 
     @property
-    def native_value(self) -> float | datetime | None:
+    def native_value(self) -> float | date | datetime | None:
         return self.entity_description.value_fn(self.coordinator.data)

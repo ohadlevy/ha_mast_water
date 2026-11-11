@@ -20,7 +20,13 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import MastApiError, MastAuthError, MastClient, MastConnectionError
+from .api import (
+    MastApiError,
+    MastAuthError,
+    MastClient,
+    MastConnectionError,
+    MastError,
+)
 from .const import (
     AUTH_RETRY_SECONDS,
     AUTH_STRIKES,
@@ -37,7 +43,15 @@ from .const import (
     TOKEN_RENEWAL_WINDOW,
     UPDATE_INTERVAL,
 )
-from .helpers import Reading, build_rows, token_expiry, token_issued
+from .helpers import (
+    BillingPeriod,
+    Reading,
+    billing_from_dict,
+    billing_to_dict,
+    build_rows,
+    token_expiry,
+    token_issued,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _STATISTIC_TOLERANCE = 0.000001  # build_rows rounds sums to six decimal places
@@ -58,6 +72,8 @@ class MastData:
     token_expiry: datetime | None
     token_issued: datetime | None = None
     renewals: int = 0
+    billing: BillingPeriod | None = None  # the latest billed period, if known
+    billing_history: tuple[BillingPeriod, ...] = ()  # all billed periods, oldest first
 
 
 def statistic_id(card: str) -> str:
@@ -104,6 +120,13 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         self._card = card
         self._expiry = token_expiry(token)
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{card}")
+        # Billed periods are kept here (and on disk) so that a period stays known
+        # even if MAST later stops returning it.
+        self._billing_store: Store = Store(
+            hass, STORE_VERSION, f"{DOMAIN}.{card}.billing"
+        )
+        self._billing: dict[date, BillingPeriod] = {}
+        self._billing_loaded = False
         self._chunk_days = CHUNK_DAYS
         self._renewals = 0
         self._rejected_resume_credential: str | None = None
@@ -402,6 +425,35 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             "Reimported %d MAST statistics rows to repair date boundaries", len(rows)
         )
 
+    async def _fetch_billing(self) -> tuple[BillingPeriod, ...]:
+        """All known billed periods, oldest first. Best effort: it never fails the update.
+
+        New or changed periods from MAST are merged into the saved ones. On any MAST
+        error the known periods are kept, so a hiccup in this extra endpoint cannot
+        disturb readings, statistics or the token handling.
+        """
+        if not self._billing_loaded:
+            self._billing_loaded = True
+            saved = await self._billing_store.async_load() or {}
+            for item in saved.get("periods", []):
+                if (period := billing_from_dict(item)) is not None:
+                    self._billing[period.end] = period
+        try:
+            fetched = await self._client.async_get_billing_periods()
+        except MastError as err:
+            _LOGGER.debug("Could not fetch MAST billing periods: %s", err)
+        else:
+            changed = False
+            for period in fetched:
+                if self._billing.get(period.end) != period:
+                    self._billing[period.end] = period
+                    changed = True
+            if changed:
+                await self._billing_store.async_save(
+                    {"periods": [billing_to_dict(p) for p in self._billing.values()]}
+                )
+        return tuple(self._billing[end] for end in sorted(self._billing))
+
     async def _async_update_data(self) -> MastData:
         await self._renew_if_needed()
 
@@ -482,6 +534,8 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         usage = (
             round(latest.value - readings[-2].value, 3) if len(readings) > 1 else None
         )
+        history = await self._fetch_billing()
+        self._persist_renewed_token()
         return MastData(
             latest.value,
             latest.day,
@@ -489,4 +543,6 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             self._expiry,
             token_issued(self._client.token),
             self._renewals,
+            history[-1] if history else None,
+            history,
         )
