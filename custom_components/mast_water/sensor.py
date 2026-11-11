@@ -90,12 +90,18 @@ SENSORS: tuple[MastSensorDescription, ...] = (
 )
 
 
+DAILY_SENSOR_KEYS = frozenset({"meter_reading", "daily_usage"})
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: MastConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = entry.runtime_data
     async_add_entities(
-        MastSensor(coordinator, entry.data[CONF_CARD], desc) for desc in SENSORS
+        MastSensor(coordinator, entry.data[CONF_CARD], desc)
+        for desc in SENSORS
+        # Billing-only corporations have no daily readings to show.
+        if not (coordinator.billing_only and desc.key in DAILY_SENSOR_KEYS)
     )
 
 

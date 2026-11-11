@@ -16,6 +16,9 @@ CONF_CARD = "card_number"
 CONF_TOKEN = "token"
 CONF_USER_TOKEN = "user_token"
 CONF_COMPANY_ID = "company_id"
+# Set on entries for water corporations that only serve billing-period data
+# (WaterMeter/* answers 401 "Company Not valid"); such entries never ask for daily readings.
+CONF_BILLING_ONLY = "billing_only"
 
 # 110 = Mei Raanana (from the X-CompanyId header the MAST web app sends)
 DEFAULT_COMPANY_ID = "110"

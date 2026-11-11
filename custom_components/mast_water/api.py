@@ -428,9 +428,23 @@ class MastClient:
             "GET", self._billing_url, params={"waterCard": self._card}
         )
         try:
-            return parse_billing_periods(payload)
+            periods = parse_billing_periods(payload)
         except (TypeError, ValueError) as err:
             raise MastApiError(f"unexpected response: {err}") from err
+        if payload and not periods:
+            # Rows without a usable `lastReading` are dropped by the parser. Log the
+            # field names (never the values) so a differently shaped response from
+            # another water corporation can be diagnosed.
+            keys = sorted(
+                {k for item in payload if isinstance(item, dict) for k in item}
+            )
+            _LOGGER.warning(
+                "MAST returned %d billing rows but none had a usable lastReading; "
+                "fields seen: %s",
+                len(payload),
+                keys,
+            )
+        return periods
 
     async def async_get_cards(self) -> list[Card]:
         """List the water cards (meters) on the logged-in account."""

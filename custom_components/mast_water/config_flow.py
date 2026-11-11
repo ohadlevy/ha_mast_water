@@ -28,6 +28,7 @@ from .api import (
     MastConnectionError,
 )
 from .const import (
+    CONF_BILLING_ONLY,
     CONF_CARD,
     CONF_COMPANY_ID,
     CONF_TOKEN,
@@ -65,13 +66,35 @@ async def _resume_credentials(
 
 
 async def _validate(
-    hass: HomeAssistant, card: str, token: str, company: str
+    hass: HomeAssistant,
+    card: str,
+    token: str,
+    company: str,
+    billing_only: bool = False,
 ) -> str | None:
-    """Return an error key, or None when the credentials work."""
+    """Return an error key, or None when the credentials work.
+
+    Billing-only corporations have no daily readings (the WaterMeter endpoints
+    answer 401 "Company Not valid"), so they are validated against the billing
+    endpoint instead. An empty answer is fine there: a new account may not have
+    been billed yet.
+    """
     expiry = token_expiry(token)
     if expiry is None or expiry <= dt_util.utcnow():
         return "invalid_auth"
     client = MastClient(async_get_clientsession(hass), token, card, company)
+    if billing_only:
+        try:
+            await client.async_get_billing_periods()
+        except MastCompanyError:
+            return "invalid_company"
+        except MastAuthError:
+            return "invalid_auth"
+        except MastConnectionError:
+            return "cannot_connect"
+        except MastApiError:
+            return "invalid_card"
+        return None
     today = dt_util.now().date()
     try:
         readings = await client.async_get_readings(today - timedelta(days=14), today)
@@ -100,6 +123,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
         self._company = DEFAULT_COMPANY_ID
         self._cards: list[Card] = []
         self._companies: list[dict[str, Any]] = []
+        self._billing_only = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -118,6 +142,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     user_token=user_token,
                 )
                 cards: list[Card] = []
+                billing_only = False
                 try:
                     await client.async_resume_session()
                     if (
@@ -136,8 +161,9 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     if not await client.async_restore_session():
                         errors["base"] = "assets_invalid"
                 except MastCompanyError:
+                    # Both the WaterMeter and the payer card lists were refused.
                     return self.async_abort(
-                        reason="no_daily_readings",
+                        reason="no_water_cards",
                         description_placeholders={"company": client.company_id},
                     )
                 except MastAuthError:
@@ -150,14 +176,12 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     return self._show_user_form(errors)
                 try:
                     cards = await client.async_get_cards()
-                    if any(c.source == "payer" for c in cards):
-                        return self.async_abort(
-                            reason="no_daily_readings",
-                            description_placeholders={"company": client.company_id},
-                        )
+                    # Cards that only exist as payer cards mean this corporation
+                    # serves billing periods but no daily readings.
+                    billing_only = any(c.source == "payer" for c in cards)
                 except MastCompanyError:
                     return self.async_abort(
-                        reason="no_daily_readings",
+                        reason="no_water_cards",
                         description_placeholders={"company": client.company_id},
                     )
                 except MastAuthError:
@@ -171,6 +195,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._user_token = client.user_token
                     self._company = client.company_id
                     self._cards = cards
+                    self._billing_only = billing_only
                     return await self.async_step_card()
         return self._show_user_form(errors)
 
@@ -200,12 +225,13 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 user_token=self._user_token,
             )
             cards: list[Card] = []
+            billing_only = False
             try:
                 if not await client.async_restore_session():
                     errors["base"] = "assets_invalid"
             except MastCompanyError:
                 return self.async_abort(
-                    reason="no_daily_readings",
+                    reason="no_water_cards",
                     description_placeholders={"company": company},
                 )
             except MastAuthError:
@@ -219,14 +245,10 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     cards = await client.async_get_cards()
-                    if any(c.source == "payer" for c in cards):
-                        return self.async_abort(
-                            reason="no_daily_readings",
-                            description_placeholders={"company": company},
-                        )
+                    billing_only = any(c.source == "payer" for c in cards)
                 except MastCompanyError:
                     return self.async_abort(
-                        reason="no_daily_readings",
+                        reason="no_water_cards",
                         description_placeholders={"company": company},
                     )
                 except MastAuthError:
@@ -240,6 +262,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._user_token = client.user_token
                 self._company = client.company_id
                 self._cards = cards
+                self._billing_only = billing_only
                 return await self.async_step_card()
 
         schema = vol.Schema(
@@ -274,7 +297,9 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
             card = str(user_input[CONF_CARD]).strip()
             await self.async_set_unique_id(card)
             self._abort_if_unique_id_configured()
-            if error := await _validate(self.hass, card, self._token, self._company):
+            if error := await _validate(
+                self.hass, card, self._token, self._company, self._billing_only
+            ):
                 errors["base"] = error
             else:
                 return self.async_create_entry(
@@ -284,6 +309,8 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_TOKEN: self._token,
                         CONF_COMPANY_ID: self._company,
                         CONF_USER_TOKEN: self._user_token,
+                        # Only stored when true, so existing entries are unchanged.
+                        **({CONF_BILLING_ONLY: True} if self._billing_only else {}),
                     },
                 )
 
@@ -386,6 +413,7 @@ class MastConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_COMPANY_ID,
                         entry.data.get(CONF_COMPANY_ID, DEFAULT_COMPANY_ID),
                     ),
+                    entry.data.get(CONF_BILLING_ONLY, False),
                 )
             ):
                 errors["base"] = error
