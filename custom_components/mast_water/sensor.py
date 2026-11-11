@@ -170,5 +170,5 @@ class MastSensor(CoordinatorEntity[MastCoordinator], SensorEntity):
         }
 
     @property
-    def native_value(self) -> float | datetime | None:
+    def native_value(self) -> float | date | datetime | None:
         return self.entity_description.value_fn(self.coordinator.data)

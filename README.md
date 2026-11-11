@@ -37,7 +37,7 @@ water page, and retries.
 | Sensor *Latest daily usage* | Difference between the two most recent daily readings (m³) |
 | Sensor *Last billing period end* | Date the latest billed period closed, i.e. where the next billing period starts. Attributes: `year`, `period`, `days`, `total_usage`, `water_price`, `sewage_price`, and `history` (every billed period, oldest first, for charts) |
 | Sensors *Last billing period private usage* / *shared usage* | Usage of the latest billed period (m³): your own meter, and your share of the building's shared consumption |
-| Sensor *Last billing period amount before VAT* | Water charge of the latest billed period (ILS, before VAT) |
+| Sensor *Last billing period amount before VAT* | Water and sewage total of the latest billed period (ILS, before VAT) |
 | Sensor *Access token expires* (diagnostic) | When the current JWT expires. Attributes: `issued`, `renewals_since_start`, `rejections_in_a_row`, `last_rejection` |
 
 The sensors deliberately have no state class, so they do not create a second series that would double count in
