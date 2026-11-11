@@ -2,9 +2,12 @@
 
 Imports your daily water meter readings from the **MAST** resident portal (used by Mei Raanana and other
 Israeli water corporations) into Home Assistant, including a backfill of your history, so the data works in
-the **Energy dashboard** and in long-term statistics.
+the **Energy dashboard** and in long-term statistics. It also adds sensors for your latest billing period
+(usage, shared usage and amount), which update once per bill rather than daily.
 
-> **Supported Corporations:** Water corporations offering daily meter readings (such as Mei Raanana, tenant 110). Billing-only corporations (such as Mei Sheva / Be'er Sheva, tenant 12) provide billing-period consumption only and are not supported for daily readings.
+> **Supported Corporations:** Water corporations offering daily meter readings (such as Mei Raanana).
+> The billing-period sensors are provided on top of the daily readings for those accounts. Billing-only
+> corporations (such as Mei Sheva / Be'er Sheva) provide billing-period consumption only.
 
 > **Unofficial.** It calls the same API the MAST web app uses, with your own session token, for your own data.
 > MAST can change or block that at any time. Not affiliated with MAST or Mei Raanana. What is known about the
@@ -48,8 +51,9 @@ Each period is saved locally the first time it is seen, so `history` grows with 
 
 ## Install
 
-1. Copy `custom_components/mast_water` into your Home Assistant `config/custom_components/` (or add this
-   repository to HACS as a custom repository and install it there).
+1. Open the **Marketplace** in Home Assistant (formerly HACS), search for **MAST Water** and download it.
+   To install manually instead, copy `custom_components/mast_water` into your Home Assistant
+   `config/custom_components/`.
 2. Restart Home Assistant.
 3. **Settings → Devices & services → Add integration → MAST Water.**
 
