@@ -52,7 +52,7 @@
       "already_configured": "This water card is already configured.",
       "reauth_successful": "Token updated.",
       "reconfigure_successful": "Done.",
-      "no_daily_readings": "Your water corporation ({company}) provides billing-period consumption only. This integration needs daily readings, so it can’t be set up for this account yet."
+      "no_water_cards": "MAST did not accept company {company} for daily readings or for billing data, so no water card could be found for this account. Check that the account has a water card with this water corporation."
     }
   },
   "entity": {

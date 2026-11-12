@@ -5,9 +5,11 @@ Israeli water corporations) into Home Assistant, including a backfill of your hi
 the **Energy dashboard** and in long-term statistics. It also adds sensors for your latest billing period
 (usage, shared usage and amount), which update once per bill rather than daily.
 
-> **Supported Corporations:** Water corporations offering daily meter readings (such as Mei Raanana).
-> The billing-period sensors are provided on top of the daily readings for those accounts. Billing-only
-> corporations (such as Mei Sheva / Be'er Sheva) provide billing-period consumption only.
+> **Supported Corporations:** Water corporations offering daily meter readings (such as Mei Raanana) get
+> the daily sensors, the statistics for the Energy dashboard and the billing-period sensors. Billing-only
+> corporations (such as Mei Sheva / Be'er Sheva) are detected automatically while adding the integration
+> and get the billing-period sensors only: they have no daily readings, so there is no meter reading,
+> daily usage or Energy dashboard data for them.
 
 > **Unofficial.** It calls the same API the MAST web app uses, with your own session token, for your own data.
 > MAST can change or block that at any time. Not affiliated with MAST or Mei Raanana. What is known about the
@@ -114,7 +116,8 @@ Settings → Dashboards → Energy → Water consumption → **Add water source*
 
 | Symptom | Likely cause |
 |---|---|
-| "Your water corporation (...) provides billing-period consumption only" | The water corporation tenant provides billing-period data only, without daily meter readings. |
+| "MAST did not accept company ... for daily readings or for billing data" | Neither the daily-reading nor the billing endpoints accept this account for the detected company. Check that the account has a water card there. |
+| Log: `MAST returned N billing rows but none had a usable lastReading` | The billing response has a different shape than expected (seen on some water corporations). Open an issue with the field names from the log. |
 | "MAST returned an error" when adding | Wrong card, a MAST backend problem, or unavailable meter data. HTTP 500 is generic and does not prove the token is invalid. |
 | Re-authentication prompt every 2 days | Only a JWT is configured, or MAST rejected the session token. Add it through Reconfigure. |
 | "MAST says the account assets are not valid" | MAST explicitly rejected the account's water assets during session restore; check the account and water access on the website. |

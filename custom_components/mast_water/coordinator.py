@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -32,6 +33,7 @@ from .const import (
     AUTH_STRIKES,
     BACKFILL_DAYS,
     CHUNK_DAYS,
+    CONF_BILLING_ONLY,
     CONF_COMPANY_ID,
     CONF_TOKEN,
     CONF_USER_TOKEN,
@@ -118,6 +120,8 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
         )
         self._client = client
         self._card = card
+        # Billing-only corporations have no daily readings: billing is all there is.
+        self.billing_only: bool = bool(entry.data.get(CONF_BILLING_ONLY, False))
         self._expiry = token_expiry(token)
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{card}")
         # Billed periods are kept here (and on disk) so that a period stays known
@@ -239,8 +243,20 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
 
     async def _get_readings(self, start: date, end: date) -> list[Reading]:
         """Fetch a range, repairing the backend session or renewing a rejected JWT."""
+        return await self._call_with_session_repair(
+            lambda: self._client.async_get_readings(start, end)
+        )
+
+    async def _get_billing_periods(self) -> list[BillingPeriod]:
+        """Fetch billed periods with the same session repair as the readings."""
+        return await self._call_with_session_repair(
+            self._client.async_get_billing_periods
+        )
+
+    async def _call_with_session_repair[T](self, call: Callable[[], Awaitable[T]]) -> T:
+        """Run a MAST call, repairing the backend session or renewing a rejected JWT."""
         try:
-            return await self._client.async_get_readings(start, end)
+            return await call()
         except MastAuthError as err:
             if not self._token_alive() and not self._client.user_token:
                 raise
@@ -257,7 +273,7 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
                     "restored" if restored else "could not restore",
                 )
                 try:
-                    return await self._client.async_get_readings(start, end)
+                    return await call()
                 except MastAuthError:
                     if not self._client.user_token:
                         raise
@@ -274,7 +290,7 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             finally:
                 self._persist_renewed_token()
             await self._client.async_restore_session()
-            return await self._client.async_get_readings(start, end)
+            return await call()
 
     async def _fetch(
         self,
@@ -425,12 +441,16 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
             "Reimported %d MAST statistics rows to repair date boundaries", len(rows)
         )
 
-    async def _fetch_billing(self) -> tuple[BillingPeriod, ...]:
-        """All known billed periods, oldest first. Best effort: it never fails the update.
+    async def _fetch_billing(
+        self, *, strict: bool = False
+    ) -> tuple[BillingPeriod, ...]:
+        """All known billed periods, oldest first.
 
-        New or changed periods from MAST are merged into the saved ones. On any MAST
-        error the known periods are kept, so a hiccup in this extra endpoint cannot
-        disturb readings, statistics or the token handling.
+        New or changed periods from MAST are merged into the saved ones. By default this
+        is best effort and never fails the update: on any MAST error the known periods
+        are kept, so a hiccup in this extra endpoint cannot disturb readings, statistics
+        or the token handling. With ``strict`` (billing-only corporations, where this is
+        the only data) errors are raised the same way a failed readings fetch would be.
         """
         if not self._billing_loaded:
             self._billing_loaded = True
@@ -439,9 +459,19 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
                 if (period := billing_from_dict(item)) is not None:
                     self._billing[period.end] = period
         try:
-            fetched = await self._client.async_get_billing_periods()
+            if strict:
+                fetched = await self._get_billing_periods()
+            else:
+                fetched = await self._client.async_get_billing_periods()
         except MastError as err:
-            _LOGGER.debug("Could not fetch MAST billing periods: %s", err)
+            if not strict:
+                _LOGGER.debug("Could not fetch MAST billing periods: %s", err)
+            elif isinstance(err, MastAuthError):
+                raise self._auth_exception(err) from err
+            elif isinstance(err, MastConnectionError):
+                raise UpdateFailed(f"Cannot reach MAST: {err}") from err
+            else:
+                raise UpdateFailed(f"MAST API error: {err}") from err
         else:
             changed = False
             for period in fetched:
@@ -454,8 +484,29 @@ class MastCoordinator(DataUpdateCoordinator[MastData]):
                 )
         return tuple(self._billing[end] for end in sorted(self._billing))
 
+    async def _async_update_billing_only(self) -> MastData:
+        """Poll a billing-only corporation: no readings, no statistics, just bills."""
+        try:
+            history = await self._fetch_billing(strict=True)
+        finally:
+            self._persist_renewed_token()
+        self.auth_failures = 0
+        self.last_auth_error = None
+        return MastData(
+            None,
+            None,
+            None,
+            self._expiry,
+            token_issued(self._client.token),
+            self._renewals,
+            history[-1] if history else None,
+            history,
+        )
+
     async def _async_update_data(self) -> MastData:
         await self._renew_if_needed()
+        if self.billing_only:
+            return await self._async_update_billing_only()
 
         stored = await self._store.async_load() or {}
         anchor_day = date.fromisoformat(stored["day"]) if stored.get("day") else None

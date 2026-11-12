@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mast_water.api import MastApiError, MastAuthError
-from custom_components.mast_water.const import DOMAIN
+from custom_components.mast_water.const import (
+    CONF_BILLING_ONLY,
+    CONF_CARD,
+    CONF_COMPANY_ID,
+    CONF_TOKEN,
+    DOMAIN,
+)
 from custom_components.mast_water.helpers import (
     billing_from_dict,
     billing_to_dict,
@@ -182,4 +189,113 @@ async def test_known_period_survives_a_later_billing_failure(
         await entry.runtime_data.async_refresh()
         await hass.async_block_till_done()
 
+    assert _state(hass, "billing_period_end").state == "2026-10-18"
+
+
+# ------------------------------------------------------------- billing-only entries
+
+
+def make_billing_only_entry(token: str) -> MockConfigEntry:
+    """A corporation with no daily readings, as saved by the config flow."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=CARD,
+        data={
+            CONF_CARD: CARD,
+            CONF_TOKEN: token,
+            CONF_COMPANY_ID: "12",
+            CONF_BILLING_ONLY: True,
+        },
+    )
+
+
+NO_READINGS = AssertionError("billing-only must not request daily readings")
+
+
+async def test_billing_only_entry_polls_billing_and_nothing_else(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_billing_only_entry(mk_token(48))
+    with (
+        patch(f"{API}.async_get_readings", side_effect=NO_READINGS),
+        patch(GET_BILLING, return_value=parse_billing_periods(SAMPLE)),
+        patch(STATS) as stats,
+    ):
+        await setup_entry(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    stats.assert_not_called()  # no readings, so nothing for the Energy dashboard
+    assert _state(hass, "billing_period_end").state == "2026-10-18"
+    assert float(_state(hass, "billing_private_usage").state) == pytest.approx(7.5)
+    assert _state(hass, "token_expiry").state not in ("unknown", "unavailable")
+    reg = er.async_get(hass)
+    for key in ("meter_reading", "daily_usage"):
+        assert reg.async_get_entity_id("sensor", DOMAIN, f"{CARD}_{key}") is None
+
+
+async def test_billing_only_entry_without_a_bill_yet_still_loads(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_billing_only_entry(mk_token(48))
+    with (
+        patch(f"{API}.async_get_readings", side_effect=NO_READINGS),
+        patch(GET_BILLING, return_value=[]),
+    ):
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.LOADED
+    assert _state(hass, "billing_period_end").state == "unavailable"
+
+
+async def test_billing_only_errors_are_not_swallowed(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    """For daily corporations billing is best effort; for billing-only it is the data."""
+    entry = make_billing_only_entry(mk_token(48))
+    with (
+        patch(f"{API}.async_get_readings", side_effect=NO_READINGS),
+        patch(GET_BILLING, side_effect=MastApiError("HTTP 500", 500)),
+    ):
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_billing_only_auth_failure_starts_reauth(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    entry = make_billing_only_entry(mk_token(48))
+    with (
+        patch(f"{API}.async_get_readings", side_effect=NO_READINGS),
+        patch(GET_BILLING, side_effect=MastAuthError("HTTP 401")),
+        patch(f"{API}.async_restore_session", AsyncMock(return_value=False)),
+    ):
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [f["context"]["source"] for f in flows] == [SOURCE_REAUTH]
+
+
+async def test_billing_only_refusal_restores_the_session_and_retries(
+    hass: HomeAssistant, recorder_mock, hass_storage
+):
+    """The session repair that protects daily readings also protects the billing call."""
+    entry = make_billing_only_entry(mk_token(48))
+    periods = parse_billing_periods(SAMPLE)
+    state = {"restored": False}
+
+    async def restore_session(self):
+        state["restored"] = True
+        return True
+
+    async def refuses_until_restored(self):
+        if not state["restored"]:
+            raise MastAuthError("HTTP 401, reason: Expired|NotValid")
+        return periods
+
+    with (
+        patch(f"{API}.async_get_readings", side_effect=NO_READINGS),
+        patch(GET_BILLING, refuses_until_restored),
+        patch(f"{API}.async_restore_session", restore_session),
+    ):
+        await setup_entry(hass, entry)
+    assert entry.state is ConfigEntryState.LOADED
     assert _state(hass, "billing_period_end").state == "2026-10-18"
