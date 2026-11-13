@@ -11,6 +11,7 @@ import pytest
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mast_water.api import (
@@ -57,7 +58,7 @@ def readings() -> list[Reading]:
         391.371,
         392.587,
     ]
-    last = date.today() - timedelta(days=1)
+    last = dt_util.now().date() - timedelta(days=1)
     return [Reading(last - timedelta(days=11 - i), v) for i, v in enumerate(values)]
 
 
@@ -364,7 +365,7 @@ async def test_404_means_no_data_not_an_error(
     hass: HomeAssistant, recorder_mock, hass_storage
 ):
     async def old_empty(self, date_from, date_to):
-        if date_to < date.today() - timedelta(days=20):
+        if date_to < dt_util.now().date() - timedelta(days=20):
             raise MastApiError("HTTP 404", 404)  # web app: 404 = empty result
         return await fake_get_readings(self, date_from, date_to)
 
